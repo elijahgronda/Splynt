@@ -1,12 +1,12 @@
 # Splynt Desktop
 
-The Splynt desktop client for Windows, Linux and macOS, built with Tauri 2,
-React and Rust. For what Splynt is and where else it runs, see the
+This is the Splynt desktop app for Windows, Linux and macOS. It's made with
+Tauri 2, React and Rust. For everything else about Splynt, check out the
 [main README](../README.md).
 
 ## Download
 
-Installers for Windows and Linux are on the
+Windows and Linux installers are on the
 [latest release](https://github.com/elijahgronda/Splynt/releases/latest).
 
 | Platform | File |
@@ -14,17 +14,17 @@ Installers for Windows and Linux are on the
 | Windows | `.exe` (NSIS) or `.msi` |
 | Linux | `.AppImage` or `.deb` |
 
-The builds are not signed, so Windows SmartScreen may stop the installer the
-first time. Choose **More info**, then **Run anyway**.
+The builds aren't signed yet, so Windows SmartScreen might stop the installer
+the first time. Hit **More info**, then **Run anyway**.
 
-There is no macOS installer. Gatekeeper blocks an unsigned Mac app, and
-signing one for distribution needs a paid Apple Developer ID. Mac users can
-build it from source, below.
+There's no Mac installer yet. macOS blocks unsigned apps, and signing one for
+everybody needs a paid Apple Developer ID. You can still build it yourself
+though, the steps are below.
 
-## Development
+## Running it yourself
 
-You need Node.js 20 or newer, stable Rust, and the platform prerequisites
-listed by [Tauri](https://tauri.app/start/prerequisites/).
+You'll need Node.js 20 or newer, Rust (stable), and whatever
+[Tauri](https://tauri.app/start/prerequisites/) needs for your system.
 
 ```sh
 cd SplyntDesktop
@@ -33,10 +33,10 @@ npm run test
 npm run tauri dev
 ```
 
-`npm run tauri dev` opens the app against the real Rust host, so playback,
-downloads and Splynt Connect behave the way they will in a release build.
-Changes under `src/` reload in place. Changes under `src-tauri/` rebuild the
-host and relaunch the window.
+`npm run tauri dev` opens the real app, so playback, downloads and Splynt
+Connect all work the same as a release build. Changes in `src/` reload right
+away. Changes in `src-tauri/` rebuild the Rust side and reopen the window,
+which takes a bit longer.
 
 ### Building on a Mac
 
@@ -44,19 +44,20 @@ host and relaunch the window.
 npm run tauri:build:mac
 ```
 
-This builds a `.app` and a `.dmg`, signed with the first Developer ID or Apple
-Development certificate in your keychain. If you have neither, open Xcode,
-sign in with your Apple ID under Settings, Accounts, and let it create a free
-Apple Development certificate. A build signed that way runs on your own Mac.
+This makes a `.app` and a `.dmg`, signed with the first Developer ID or Apple
+Development certificate in your keychain. If you don't have either one, open
+Xcode, sign in with your Apple ID under Settings, Accounts, and let it make a
+free Apple Development certificate. A build signed that way runs on your own
+Mac.
 
 ### Release builds
 
-Installers have to be built on the system they target. The
+Installers have to be built on the system they're for, so the
 [Desktop installers](../.github/workflows/desktop-installers.yml) workflow
 builds Windows and Linux on GitHub Actions. Pushing a `v*` tag runs it and
-attaches the installers to a draft release. Running it by hand from the Actions
-tab attaches them to the run instead, and publishes nothing.
+puts the installers on a draft release. You can also run it by hand from the
+Actions tab, which attaches them to the run and doesn't publish anything.
 
 ## License
 
-[GNU GPL v3.0 or later](../LICENSE).
+[GPL-3.0 or later](../LICENSE).

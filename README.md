@@ -5,14 +5,16 @@
 <h1 align="center">Splynt</h1>
 
 <p align="center">
-  A Spotify-style music player for your own
-  <a href="https://www.navidrome.org/">Navidrome</a> or Subsonic-compatible server.
+  A Spotify-style client for your own
+  <a href="https://www.navidrome.org/">Navidrome</a> or Subsonic server.
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/kkaZfRpsm"><strong>Join the iPhone beta on Discord</strong></a>
+  <a href="https://testflight.apple.com/join/UWvEDqQc"><strong>Join the iPhone beta</strong></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/elijahgronda/Splynt/releases/latest"><strong>Download for Windows or Linux</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://discord.gg/kkaZfRpsm"><strong>Discord</strong></a>
 </p>
 
 <p align="center">
@@ -31,76 +33,86 @@
 
 ---
 
-I wanted Spotify's feel for the music on my own server, so I built it. You bring
-a Navidrome or Subsonic server and your library. Splynt brings no music of its
-own, and everything you see after you sign in comes from your server.
+I wanted something that works exactly like Spotify but plays from my own
+server, so I made Splynt! You'll need your own Navidrome or Subsonic server to
+use it. Splynt doesn't come with any music, everything you see is from your
+server.
 
-It's been my everyday player for a while, so it's in good shape. I also ship
-updates often, and there are still rough edges. If you hit one, tell me in the
-[Discord](https://discord.gg/kkaZfRpsm).
+I've been using it as my main player for a while now, so it's pretty polished.
+I put out updates pretty often though, so there are still a lot of things I'm
+ironing out. If you run into anything, let me know in the
+[Discord](https://discord.gg/kkaZfRpsm)!
 
-## What it does
+## Features
 
-- **Gapless playback and crossfade.** Albums play straight through with no
-  silence between tracks, or you can fade each song into the next.
-- **A ten-band equalizer.** Twelve presets and a preamp, applied to everything
-  Splynt plays, streamed or downloaded.
-- **Search your library, or search by lyrics.** Splynt indexes your lyrics, so
-  a line you half remember is enough to find the song.
-- **Synced lyrics.** They follow the song line by line, on a card under the
-  player or full screen.
-- **Artist pages with the whole discography.** Popular songs, every release,
-  and how many times you've played each one.
-- **Daily Mixes from your own listening.** Built from what you actually play.
-- **Playlist suggestions.** Under each of your playlists, ten songs that fit
-  it. Add one and another slides into its place.
-- **Home Screen widgets.** One for what's playing, one for your listening stats.
-- **A home feed you control.** Pick which rows Home shows.
+- **Gapless and crossfade playback.** Albums play straight through, or you can
+  fade songs into each other.
+- **Audio equalizer.** Ten bands, twelve presets and a preamp. It works on
+  everything, streamed or downloaded.
+- **Library search AND indexed lyric search.** Splynt indexes your lyrics, so
+  you can find a song from just a line you remember.
+- **Synced lyrics.** They follow along with the song, under the player or full
+  screen.
+- **Artist discography pages.** Every release, their popular songs, and how
+  many times you've played each one.
+- **Daily Mixes based on your listening.** Splynt has its own recommendation
+  engine for these. It's not perfect yet, and it can take a little bit to index
+  your library before they show up. You can turn the row off if you'd rather
+  not have it.
+- **Playlist suggestions.** Ten songs that fit the playlist show up at the
+  bottom of your playlists. Add one and a new one pops into its spot.
+- **Widgets.** One for what's playing and one for your listening stats.
+- **Adjustable home feeds.** Pick what shows up on Home.
 
-There's more around the edges: offline downloads for each server you use, the
-audio format on every track, play counts, a sleep timer, and one tap to save
-the queue as a playlist.
+There's also offline downloads, play counts, a sleep timer, the audio format on
+every track, and you can save your queue as a playlist.
 
 ## Get Splynt
 
 | Device | How |
 | --- | --- |
-| iPhone | Beta on TestFlight. Invites go out in the [Discord](https://discord.gg/kkaZfRpsm). An App Store release is planned |
+| iPhone | Beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc). An App Store release is planned! |
 | Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
 | Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
-| macOS | [Build it from source](SplyntDesktop/README.md#building-on-a-mac) |
-| Apple TV and Apple Watch | In development |
+| macOS | [Build it from source](SplyntDesktop/README.md#building-on-a-mac) for now |
+| Apple TV and Apple Watch | Working on it! |
 
-The desktop installers aren't signed yet, so Windows may warn you the first
-time you run one. Choose **More info**, then **Run anyway**.
+The desktop builds aren't signed yet, so Windows might warn you the first time
+you open one. Hit **More info**, then **Run anyway**.
 
-## The desktop app
+## Desktop
 
-The desktop app is free and open source, and its code is in this repository.
-It has a library sidebar with filters and sorting, a top bar with Home and
-search, and a player along the bottom that stays put while you browse. It
-shares gapless playback, crossfade, the equalizer, synced lyrics and artist
-discographies with the iPhone app. It adds listening stats and Splynt Connect,
-which hands playback between Splynt desktops on your network.
+The desktop app is free and open source, and all of its code is right here.
+It's built to work like Spotify on desktop: your library on the left, Home and
+search up top, and the player along the bottom. It has the same gapless,
+crossfade, equalizer, synced lyrics and discography pages as the iPhone app,
+plus listening stats and Splynt Connect so you can pass playback between your
+computers.
 
-It's built with Tauri 2, React and Rust. Build steps for Windows, Linux and
-macOS are in [SplyntDesktop/README.md](SplyntDesktop/README.md).
+It's made with Tauri 2, React and Rust. If you want to build it yourself, the
+steps are in [SplyntDesktop/README.md](SplyntDesktop/README.md).
+
+## Bugs and feature requests
+
+Post them in the [Discord](https://discord.gg/kkaZfRpsm) forums! If it's a
+bug, sending your log helps a ton:
+
+- **iPhone:** Settings, About, Export Debug Log
+- **Desktop:** Settings, Diagnostics, Show log
 
 ## Docs
 
 - [Changelog](CHANGELOG.md)
-- [Desktop UX spec](docs/desktop/DESKTOP-UX-SPEC.md), the interaction rules the
-  desktop app follows
+- [Desktop UX spec](docs/desktop/DESKTOP-UX-SPEC.md), how the desktop app is
+  supposed to behave
 - [Splynt Connect](docs/connect/README.md) and its
   [wire protocol](docs/connect/WIRE-V1.md), how Splynt apps find each other and
-  hand off playback on a local network
+  pass playback around on your network
 
 ## License
 
-The code in this repository is licensed under the
-[GNU GPL v3.0 or later](LICENSE). You can use, change and share it. If you
-distribute a modified version, you have to release it under the GPL with its
-source.
+The desktop app is [GPL-3.0 or later](LICENSE). Use it, change it, share it!
+If you share a modified version, it has to stay GPL with the source available.
 
-The iPhone, Apple TV and Apple Watch apps are separate, closed-source products.
-Their code isn't in this repository, and this license doesn't cover them.
+The iPhone, Apple TV and Apple Watch apps are separate and closed source, so
+they're not in here and this license doesn't cover them.
