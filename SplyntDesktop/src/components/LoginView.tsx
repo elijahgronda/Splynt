@@ -81,7 +81,7 @@ export function LoginView({ initialError, onConnected }: LoginViewProps) {
   }
 
   return (
-    <main className="login-page">
+    <main className="login-page" data-tauri-drag-region>
       <div className="login-page__glow" aria-hidden="true" />
       <section className="login-card" aria-labelledby="login-title">
         <Brand />

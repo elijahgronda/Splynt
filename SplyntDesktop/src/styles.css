@@ -2073,6 +2073,17 @@ html[data-platform="macos"] .global-bar__leading { padding-left: 76px; }
 .global-bar .desktop-search button:hover,
 .desktop-search__browse--active { color: #fff !important; }
 .global-bar__trailing { display: flex; align-items: center; justify-self: end; gap: 8px; min-width: 0; padding-right: 8px; }
+html[data-platform="windows"] .global-bar__trailing { padding-right: 138px; }
+
+.window-controls { position: fixed; z-index: 250; top: 0; right: 0; display: flex; height: 32px; }
+.window-controls button { display: grid; place-items: center; width: 46px; height: 32px; padding: 0; border: 0; border-radius: 0; color: #b3b3b3; background: transparent; cursor: default; }
+.window-controls button:hover { color: #fff; background: #242424; }
+.window-controls button:active { background: #333; }
+.window-controls .window-controls__close:hover { color: #fff; background: #c42b1c; }
+.window-controls .window-controls__close:active { background: #a7251a; }
+@media (forced-colors: active) {
+  .window-controls button:hover { color: HighlightText; background: Highlight; }
+}
 .global-bar .account-pill { width: 32px; height: 32px; border: 0; box-shadow: 0 0 0 4px #1f1f1f; }
 
 .search-dropdown { position: absolute; z-index: 150; top: calc(100% + 8px); right: 0; left: 0; display: grid; padding: 8px 4px 12px; border-radius: 8px; background: #282828; box-shadow: var(--shadow-menu); animation: menu-in 120ms ease; }

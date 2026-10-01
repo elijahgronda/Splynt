@@ -78,7 +78,7 @@ export default function App() {
 
   if (isRestoring) {
     return (
-      <main className="splash-page" aria-label="Opening Splynt">
+      <main className="splash-page" aria-label="Opening Splynt" data-tauri-drag-region>
         <Brand />
         <span className="spinner" aria-hidden="true" />
         <div className="splash-page__status" role="status">

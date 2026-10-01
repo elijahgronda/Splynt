@@ -240,6 +240,9 @@ pub fn run() {
 
             let handle = app.handle().clone();
             app.set_menu(build_menu(&handle)?)?;
+            #[cfg(target_os = "windows")]
+            // Keep menu accelerators without adding a native strip above the app bar.
+            app.hide_menu()?;
             app.on_menu_event(|app, event| {
                 if event.id() == "preferences" {
                     let _ = app.emit("menu-command", "preferences");
