@@ -1,0 +1,155 @@
+name: Desktop installers
+
+# Windows and Linux only. macOS is deliberately NOT built here.
+#
+# Building it produced an unsigned .app/dmg, and an unsigned Mac app is not
+# something you can hand to anyone: Gatekeeper refuses it on first launch and
+# the recipient has to right-click -> Open, or clear the quarantine attribute
+# by hand. Shipping an installer that needs those instructions is worse than
+# not shipping one, so the two macOS jobs were removed rather than left
+# producing artifacts nobody should download.
+#
+# It also removed a real trap. A repository secret that does not exist still
+# renders as an empty string, and the variable is still DEFINED — while
+# tauri-bundler decides to codesign on `APPLE_CERTIFICATE` being present
+# rather than on it having a value. So with no Apple secrets configured at
+# all, both macOS jobs entered the signing path and died in `security import`
+# (run 89680830758). No macOS job means no Apple variables, and that whole
+# class of failure is gone.
+#
+# Mac builds still happen locally: `npm run tauri:build:mac` in SplyntDesktop.
+#
+# To restore CI macOS builds, a paid Developer ID certificate is needed first.
+# Add the matrix entry back, then pass the Apple secrets in through
+# $GITHUB_ENV from a step that writes nothing when the certificate is absent —
+# never straight into the build step's `env:`, which is what broke it before.
+
+on:
+  # Run this by hand from the Actions tab to get a test build of any branch.
+  # A manual run creates no tag and no release: it attaches the installers to
+  # the run itself, under Artifacts, and picking one platform keeps it quick.
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which installers to build
+        type: choice
+        default: windows
+        options:
+          - windows
+          - linux
+          - all
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  choose-platforms:
+    name: Choose platforms
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Pick the build matrix
+        id: pick
+        shell: bash
+        env:
+          # A tag build always produces the complete set; a manual run honours
+          # the choice, defaulting to Windows because that is the machine this
+          # cannot be tested on locally from a Mac.
+          REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
+        run: |
+          # No macOS entry. See the note at the head of this file.
+          windows='{"name":"Windows x64","platform":"windows-latest","rustTargets":"","args":"--bundles nsis,msi"}'
+          linux='{"name":"Linux x64","platform":"ubuntu-22.04","rustTargets":"","args":"--bundles appimage,deb"}'
+          case "$REQUESTED" in
+            windows) include="$windows" ;;
+            linux)   include="$linux" ;;
+            *)       include="$windows,$linux" ;;
+          esac
+          echo "matrix={\"include\":[$include]}" >> "$GITHUB_OUTPUT"
+
+  build-desktop:
+    name: ${{ matrix.name }}
+    needs: choose-platforms
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.choose-platforms.outputs.matrix) }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Linux desktop dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: SplyntDesktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: ${{ matrix.rustTargets }}
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: SplyntDesktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: SplyntDesktop
+        run: npm ci
+
+      - name: Run desktop tests
+        working-directory: SplyntDesktop
+        run: npm run test
+
+      - name: Build desktop frontend
+        working-directory: SplyntDesktop
+        run: npm run build
+
+      - name: Audit production frontend dependencies
+        working-directory: SplyntDesktop
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Check Rust formatting
+        working-directory: SplyntDesktop/src-tauri
+        run: cargo fmt --check
+
+      - name: Lint native host
+        working-directory: SplyntDesktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run native host tests
+        working-directory: SplyntDesktop/src-tauri
+        run: cargo test
+
+      # No Apple signing variables anywhere in this workflow, deliberately —
+      # nothing here builds for macOS. See the note at the head of the file.
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: SplyntDesktop
+          # Only a tag push publishes anything. A manual run leaves these empty,
+          # so no draft release is created and the installers are downloadable
+          # from the run's Artifacts section instead.
+          tagName: ${{ github.ref_type == 'tag' && 'v__VERSION__' || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && 'Splynt v__VERSION__' || '' }}
+          releaseDraft: ${{ github.ref_type == 'tag' }}
+          prerelease: false
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: Splynt-[version]-[platform]-[arch]-[bundle]
+          args: ${{ matrix.args }}
