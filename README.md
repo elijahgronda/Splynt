@@ -74,10 +74,10 @@ every track, and you can save your queue as a playlist.
 | iPhone | Beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc). An App Store release is planned! |
 | Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
 | Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
-| macOS | [Build it from source](SplyntDesktop/README.md#building-on-a-mac) for now |
+| macOS | [Test builds](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml) or [build it from source](SplyntDesktop/README.md#building-on-a-mac) |
 | Apple TV and Apple Watch | Working on it! |
 
-The desktop builds aren't signed yet, so Windows might warn you the first time
+The Windows installers aren't signed yet, so Windows might warn you the first time
 you open one. Hit **More info**, then **Run anyway**.
 
 ## Desktop

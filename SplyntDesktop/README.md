@@ -8,18 +8,23 @@ Tauri 2, React and Rust. For everything else about Splynt, check out the
 
 Windows and Linux installers are on the
 [latest release](https://github.com/elijahgronda/Splynt/releases/latest).
+macOS test builds are attached to manual
+[Desktop installers runs](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml).
 
 | Platform | File |
 | --- | --- |
 | Windows | `.exe` (NSIS) or `.msi` |
 | Linux | `.AppImage` or `.deb` |
+| macOS test | `.dmg` for Apple Silicon or Intel |
 
 The builds aren't signed yet, so Windows SmartScreen might stop the installer
 the first time. Hit **More info**, then **Run anyway**.
 
-There's no Mac installer yet. macOS blocks unsigned apps, and signing one for
-everybody needs a paid Apple Developer ID. You can still build it yourself
-though, the steps are below.
+The macOS test builds use an ad-hoc signature. They are not notarized or
+published in releases. After copying Splynt from the `.dmg`, try to open it,
+then use **System Settings > Privacy & Security > Open Anyway** if Gatekeeper
+blocks it. A regular Mac release still needs Developer ID signing and
+notarization. You can also build the app on your own Mac below.
 
 ## Running it yourself
 
@@ -55,8 +60,9 @@ Mac.
 Installers have to be built on the system they're for, so the
 [Desktop installers](../.github/workflows/desktop-installers.yml) workflow
 builds Windows and Linux on GitHub Actions. Pushing a `v*` tag runs it and
-puts the installers on a draft release. You can also run it by hand from the
-Actions tab, which attaches them to the run and doesn't publish anything.
+puts those installers on a draft release. A manual run can also build macOS
+test artifacts for both chip types. It attaches installers to the run without
+publishing a release.
 
 ## License
 
