@@ -9,6 +9,7 @@ let icons = project.appendingPathComponent("src-tauri/icons", isDirectory: true)
 let sourceURL = icons.appendingPathComponent("icon.png")
 let masterURL = icons.appendingPathComponent("icon-macos.png")
 let outputURL = icons.appendingPathComponent("icon.icns")
+let windowsOutputURL = icons.appendingPathComponent("icon.ico")
 
 guard let source = NSImage(contentsOf: sourceURL) else {
   fatalError("Could not read \(sourceURL.path)")
@@ -137,3 +138,37 @@ guard iconutil.terminationStatus == 0 else {
 
 print("Wrote \(masterURL.path)")
 print("Wrote \(outputURL.path)")
+
+// Windows uses PNG-backed ICO entries. Keep the same transparent, rounded mark
+// as the Dock icon so its taskbar image does not inherit icon.png's square edge.
+let windowsSizes = [16, 24, 32, 48, 64, 256]
+let windowsImages = windowsSizes.map { png(size: $0) }
+var windowsIcon = Data()
+func append16(_ value: Int) {
+  windowsIcon.append(UInt8(value & 0xff))
+  windowsIcon.append(UInt8((value >> 8) & 0xff))
+}
+func append32(_ value: Int) {
+  append16(value & 0xffff)
+  append16((value >> 16) & 0xffff)
+}
+append16(0)
+append16(1)
+append16(windowsImages.count)
+var imageOffset = 6 + windowsImages.count * 16
+for (size, image) in zip(windowsSizes, windowsImages) {
+  windowsIcon.append(UInt8(size == 256 ? 0 : size))
+  windowsIcon.append(UInt8(size == 256 ? 0 : size))
+  windowsIcon.append(0)
+  windowsIcon.append(0)
+  append16(1)
+  append16(32)
+  append32(image.count)
+  append32(imageOffset)
+  imageOffset += image.count
+}
+for image in windowsImages {
+  windowsIcon.append(image)
+}
+try windowsIcon.write(to: windowsOutputURL, options: .atomic)
+print("Wrote \(windowsOutputURL.path)")

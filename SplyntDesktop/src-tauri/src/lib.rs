@@ -11,6 +11,23 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager, WindowEvent,
 };
+use tauri_plugin_window_state::StateFlags;
+
+fn persisted_window_state_flags() -> StateFlags {
+    // Older installs may have saved a native title bar. The platform config owns
+    // decorations; window state only restores placement and visibility.
+    StateFlags::all() & !StateFlags::DECORATIONS
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::*;
+
+    #[test]
+    fn saved_window_state_does_not_override_platform_decorations() {
+        assert!(!persisted_window_state_flags().contains(StateFlags::DECORATIONS));
+    }
+}
 
 /// Set from the frontend so closing the window can follow the user's
 /// background-playback preference instead of guessing.
@@ -219,7 +236,11 @@ pub fn run() {
             // rival instance against the same downloads and Connect identity.
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(persisted_window_state_flags())
+                .build(),
+        )
         .manage(BackgroundPlayback::default())
         .manage(SessionState::default())
         .manage(DownloadState::default())
