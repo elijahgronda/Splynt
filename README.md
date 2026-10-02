@@ -33,15 +33,12 @@
 
 ---
 
-I wanted something that works exactly like Spotify but plays from my own
-server, so I made Splynt! You'll need your own Navidrome or Subsonic server to
-use it. Splynt doesn't come with any music, everything you see is from your
-server.
+Splynt is a Navidrome client that has a very familiar UI. There are currently 2 main builds, one for iOS and one for Desktop.
 
 I've been using it as my main player for a while now, so it's pretty polished.
 I put out updates pretty often though, so there are still a lot of things I'm
 ironing out. If you run into anything, let me know in the
-[Discord](https://discord.gg/kkaZfRpsm)!
+[Discord](https://discord.gg/kkaZfRpsm).
 
 ## Features
 
@@ -75,7 +72,7 @@ every track, and you can save your queue as a playlist.
 | Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
 | Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
 | macOS | [Test builds](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml) or [build it from source](SplyntDesktop/README.md#building-on-a-mac) |
-| Apple TV and Apple Watch | Working on it! |
+| Apple TV and Apple Watch | in progress |
 
 The Windows installers aren't signed yet, so Windows might warn you the first time
 you open one. Hit **More info**, then **Run anyway**.
