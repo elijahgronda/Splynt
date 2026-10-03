@@ -351,6 +351,164 @@ frame to end it. A leader that goes quiet mid-correction would otherwise leave
 a follower at 98% indefinitely, walking away from the room at exactly the rate
 meant to catch it up.
 
+## Remote control extension
+
+This lets any Splynt device act as a full remote for whichever device is
+playing, the way Spotify Connect does. Like the extensions above it is
+v1-compatible: an old client omits the new fields and ignores the new command
+names, and every new field is optional on decode.
+
+The exact frames for this section are in
+[wire-fixtures.json](wire-fixtures.json). The desktop's Rust tests and the iOS
+Swift tests both decode and re-encode every frame in it, check the bounds
+below, and run its follow scenarios against their own implementation. The file
+exists in both repositories, like this one. Change both copies in one edit.
+
+### Playback fields
+
+```json
+"playback": {
+  "trackID": "id-2",
+  "title": "Second Song",
+  "artist": "Artist",
+  "album": "Album",
+  "coverArtID": "cover-2",
+  "isPlaying": true,
+  "position": 42.25,
+  "duration": 218.0,
+  "shuffle": false,
+  "repeatMode": "all",
+  "volume": 0.8,
+  "queueRevision": 17,
+  "queueIndex": 1,
+  "queueLength": 3,
+  "contextLabel": "Album"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `shuffle` | The device plays its queue in shuffled order. |
+| `repeatMode` | `off`, `all` or `one`. Read any other value as `off`. |
+| `volume` | 0 to 1. Splynt's own player gain, not the system volume. |
+| `queueRevision` | Changes whenever the queue's contents, its order or the current index change. Compare it for equality only, because a relaunched app may start counting again from any number. |
+| `queueIndex` | Where the current track sits in the queue that `queueState` describes. |
+| `queueLength` | Entries in that queue. It can exceed the 1,000 one `queueState` carries. |
+| `contextLabel` | What the listener is playing from, such as an album or playlist name. Spotify shows it as "Playing from". |
+
+A device that publishes none of these is a v1 peer. A controller disables
+shuffle, repeat, volume and queue editing for it, with a note that the device
+needs a Splynt update, and does not fake those controls locally.
+
+Every frame's `position` is current at the moment it is written. While
+playing, the transport adds the time since the app last published to the
+position it holds, and the 3 s heartbeat does the same. Before this a heartbeat
+repeated the last published position, up to 3 s old, and a receiver that
+projects from its own receive time drew a progress bar that jumped backwards.
+A receiver shows `position + (now - updatedAt)` while the peer plays, clamped
+to `duration`, where `updatedAt` is its own receive stamp.
+
+### Commands
+
+```json
+{ "name": "setShuffle", "value": 1 }
+{ "name": "setRepeat", "value": 2 }
+{ "name": "setVolume", "value": 0.65 }
+{ "name": "skipTo", "queueItem": { "index": 2, "trackID": "id-3" } }
+{ "name": "enqueue", "tracks": { "trackIDs": ["id-9"] } }
+{ "name": "playNext", "tracks": { "trackIDs": ["id-8", "id-9"] } }
+{ "name": "queueRequest" }
+{ "name": "queueState", "queue": { "revision": 17, "offset": 0, "index": 1,
+                                   "trackIDs": ["id-1", "id-2", "id-3"],
+                                   "contextLabel": "Album" } }
+```
+
+- `setShuffle` takes 0 for off and 1 for on. `setRepeat` takes 0 for off, 1
+  for all and 2 for one. `setVolume` takes 0 to 1.
+- `skipTo` counts `index` from the start of the whole queue, as `queueIndex`
+  does. The receiver jumps to `index` if that entry is `trackID`, otherwise to
+  the first occurrence of `trackID`, otherwise it ignores the command. The ID
+  check covers a queue that changed between the controller reading it and the
+  listener tapping a row.
+- `enqueue` is the local Add to queue, so the tracks go after anything the
+  listener already added. `playNext` is Play next, so they go straight after
+  the current track. Both keep the given order and carry at most 1,000 IDs.
+- Each of these ends in a state broadcast, like every v1 command.
+
+`queueRequest` and `queueState` belong to the transport, like the clock probe.
+Neither reaches the player or a command queue, and neither is followed by a
+state broadcast.
+
+- A device answers `queueRequest` on the connection it arrived on, with the
+  queue its app last published. A device with nothing loaded does not answer.
+- A `queueState` is stored against the peer whose connection delivered it. A
+  controller sends `queueRequest` when it starts following a peer and again
+  whenever that peer's `queueRevision` changes.
+- `trackIDs` carries at most 1,000 IDs. A longer queue sends a window that
+  starts 50 tracks before the current one: `offset = max(0, index - 50)`, and
+  the IDs are `queue[offset ..< min(length, offset + 1000)]`. `index` still
+  counts from the start of the whole queue, so the current track is
+  `trackIDs[index - offset]`. A queue of 1,000 or fewer goes whole, with
+  `offset` 0.
+
+The queue is the device's queue as its own Queue view lists it. On iOS that is
+the tracks already played in this list, the current one, then Up Next in play
+order. On the desktop it is the queue in list order, whatever shuffle does to
+the play order.
+
+A receiver drops a command outside these bounds:
+
+| Command | Bound |
+| --- | --- |
+| `setShuffle` | `value` is 0 or 1 |
+| `setRepeat` | `value` is 0, 1 or 2 |
+| `setVolume` | `value` is finite, from 0 to 1 |
+| `skipTo` | `index` is 0 or more, `trackID` is 1 to 1,024 bytes |
+| `enqueue`, `playNext` | 1 to 1,000 IDs, each 1 to 1,024 bytes |
+| `queueState` | `revision`, `offset` and `index` are 0 or more; at most 1,000 IDs, each 1 to 1,024 bytes; `contextLabel` at most 256 bytes |
+
+### Following the active device
+
+Whichever device is playing is the active device, and every other Splynt app
+on the account shows that playback as if it were its own. These rules are the
+same on every platform, and the follow scenarios in the fixtures file pin them.
+
+- A peer plays its own audio when `isPlaying` is true, `trackID` is set and
+  `commitment.controllingPeerID` is absent. A peer that is a follower in a
+  group session (`sessionID` set and `leaderID` not its own ID) is not a
+  candidate either, because the leader's sync frames would override anything a
+  remote sent it.
+- A device follows such a peer automatically when it is not rendering audio
+  itself, is in no group session, and is not already following another
+  device. A peer driving this device is excluded by the first rule.
+- A device with a track loaded but paused follows only a peer that started
+  playing after this device last stopped. Without that, pausing the phone
+  handed it to whatever was playing in another room: on 2026-08-31 a route
+  change paused the phone and it spent 45 minutes as an Apple TV's remote. A
+  device with nothing loaded, or one that has not played anything since
+  launch, follows any qualifying peer.
+- Of several qualifying peers, follow the one that most recently started
+  playing, and break a tie with the smaller device ID. A device records when
+  each peer's `isPlaying` turned true in the frames it received. A peer first
+  seen already playing counts as starting then.
+- While following, publish idle playback with `commitment.controllingPeerID`
+  set to the followed peer.
+- Stay attached when the followed peer pauses. Switch when another peer starts
+  playing its own audio after the followed one paused. Detach when the
+  followed peer expires, when it starts controlling another device, or when
+  the listener picks this device. A peer that expired is not followed again
+  for 30 s.
+- Starting playback while following sends a `handoff` to the followed peer and
+  never plays locally.
+- Picking this device moves playback here. It sends `pause` to the followed
+  peer first, then starts the same queue, track and position locally, so the
+  peer sees this device start after it stopped.
+- After sending anything that changes the track (`next`, `previous`,
+  `handoff`, `skipTo`), ignore frames that still report the old `trackID` for
+  up to 2.5 s. Otherwise the mirror flickers back to the old song.
+- Resolve the mirrored queue's IDs against the server in batches, current
+  track first, and cache them by `queueRevision`.
+
 ## Desktop identity
 
 - Persist one random UUID per application installation in OS application data.
@@ -371,6 +529,8 @@ Before enabling Connect in the UI, automated tests must cover:
   exchange;
 - exact frames for group accept and decline, a peer frame with no `commitment`,
   and a group frame with no `revision`, since both must still decode;
+- every frame, bound, queue window and follow scenario in
+  [wire-fixtures.json](wire-fixtures.json), read by both test suites;
 - fragmented frames, multiple frames in one chunk, invalid JSON, authentication mismatch, and oversized unterminated data;
 - peer freshness based on receiver time;
 - iOS ↔ macOS, iOS ↔ Windows, tvOS ↔ desktop, and desktop ↔ desktop discovery and command exchange.

@@ -1,0 +1,280 @@
+{
+  "about": "Exact Splynt Connect frames and rules. The desktop's Rust tests and the iOS Swift tests both read this file: they decode each frame, encode it again and compare with the JSON here, check every command against the bounds, and run the follow scenarios. WIRE-V1.md explains each field. The desktop and iOS repositories each hold an identical copy under docs/connect; change both in the same edit.",
+  "peers": [
+    {
+      "name": "v1 playing state with no extension fields",
+      "extension": false,
+      "frame": {
+        "id": "phone", "name": "iPhone", "platform": "iPhone", "updatedAt": 808315200.0,
+        "playback": {
+          "trackID": "id-2", "title": "Second Song", "artist": "Artist", "album": "Album",
+          "coverArtID": "cover-2", "isPlaying": true, "position": 42.25, "duration": 218.0
+        }
+      }
+    },
+    {
+      "name": "idle state",
+      "extension": false,
+      "frame": {
+        "id": "mac", "name": "Studio", "platform": "macOS", "updatedAt": 808315200.0,
+        "playback": { "isPlaying": false, "position": 0, "duration": 0 }
+      }
+    },
+    {
+      "name": "a follower publishing idle while it drives another device",
+      "extension": false,
+      "frame": {
+        "id": "mac", "name": "Studio", "platform": "macOS", "updatedAt": 808315200.0,
+        "playback": { "isPlaying": false, "position": 0, "duration": 0 },
+        "commitment": { "revision": 0, "controllingPeerID": "phone" }
+      }
+    },
+    {
+      "name": "remote control extension state",
+      "extension": true,
+      "frame": {
+        "id": "phone", "name": "iPhone", "platform": "iPhone", "updatedAt": 808315200.0,
+        "playback": {
+          "trackID": "id-2", "title": "Second Song", "artist": "Artist", "album": "Album",
+          "coverArtID": "cover-2", "isPlaying": true, "position": 42.25, "duration": 218.0,
+          "shuffle": false, "repeatMode": "all", "volume": 0.8,
+          "queueRevision": 17, "queueIndex": 1, "queueLength": 3, "contextLabel": "Album"
+        },
+        "commitment": { "revision": 0 }
+      }
+    },
+    {
+      "name": "one extension field is enough to mark a peer as updated",
+      "extension": true,
+      "frame": {
+        "id": "tv", "name": "Living Room", "platform": "tvOS", "updatedAt": 808315200.0,
+        "playback": { "isPlaying": false, "position": 0, "duration": 0, "volume": 1 }
+      }
+    },
+    {
+      "name": "an unknown repeat mode still decodes",
+      "extension": true,
+      "frame": {
+        "id": "phone", "name": "iPhone", "platform": "iPhone", "updatedAt": 808315200.0,
+        "playback": {
+          "trackID": "id-2", "isPlaying": true, "position": 1, "duration": 2,
+          "repeatMode": "shuffle-repeat"
+        }
+      }
+    }
+  ],
+  "commands": [
+    { "name": "shuffle on", "valid": true, "frame": { "name": "setShuffle", "value": 1 } },
+    { "name": "shuffle off", "valid": true, "frame": { "name": "setShuffle", "value": 0 } },
+    { "name": "shuffle with no value", "valid": false, "frame": { "name": "setShuffle" } },
+    { "name": "shuffle out of range", "valid": false, "frame": { "name": "setShuffle", "value": 2 } },
+    { "name": "repeat off", "valid": true, "frame": { "name": "setRepeat", "value": 0 } },
+    { "name": "repeat all", "valid": true, "frame": { "name": "setRepeat", "value": 1 } },
+    { "name": "repeat one", "valid": true, "frame": { "name": "setRepeat", "value": 2 } },
+    { "name": "repeat out of range", "valid": false, "frame": { "name": "setRepeat", "value": 3 } },
+    { "name": "repeat that is not a whole number", "valid": false, "frame": { "name": "setRepeat", "value": 1.5 } },
+    { "name": "volume", "valid": true, "frame": { "name": "setVolume", "value": 0.65 } },
+    { "name": "volume at full", "valid": true, "frame": { "name": "setVolume", "value": 1 } },
+    { "name": "volume above full", "valid": false, "frame": { "name": "setVolume", "value": 1.2 } },
+    { "name": "volume below zero", "valid": false, "frame": { "name": "setVolume", "value": -0.1 } },
+    { "name": "skip to a queue row", "valid": true, "frame": { "name": "skipTo", "queueItem": { "index": 2, "trackID": "id-3" } } },
+    { "name": "skip to a negative row", "valid": false, "frame": { "name": "skipTo", "queueItem": { "index": -1, "trackID": "id-3" } } },
+    { "name": "skip to an empty track", "valid": false, "frame": { "name": "skipTo", "queueItem": { "index": 0, "trackID": "" } } },
+    { "name": "skip with no row", "valid": false, "frame": { "name": "skipTo" } },
+    { "name": "add to queue", "valid": true, "frame": { "name": "enqueue", "tracks": { "trackIDs": ["id-9"] } } },
+    { "name": "play next keeps its order", "valid": true, "frame": { "name": "playNext", "tracks": { "trackIDs": ["id-8", "id-9"] } } },
+    { "name": "add nothing to the queue", "valid": false, "frame": { "name": "enqueue", "tracks": { "trackIDs": [] } } },
+    { "name": "play next with an empty ID", "valid": false, "frame": { "name": "playNext", "tracks": { "trackIDs": ["id-8", ""] } } },
+    { "name": "queue request", "valid": true, "frame": { "name": "queueRequest" } },
+    {
+      "name": "queue state", "valid": true,
+      "frame": { "name": "queueState", "queue": { "revision": 17, "offset": 0, "index": 1, "trackIDs": ["id-1", "id-2", "id-3"], "contextLabel": "Album" } }
+    },
+    {
+      "name": "queue state without a label", "valid": true,
+      "frame": { "name": "queueState", "queue": { "revision": 0, "offset": 550, "index": 600, "trackIDs": ["id-550"] } }
+    },
+    {
+      "name": "queue state with a negative index", "valid": false,
+      "frame": { "name": "queueState", "queue": { "revision": 1, "offset": 0, "index": -1, "trackIDs": ["id-1"] } }
+    },
+    { "name": "an unknown command", "valid": false, "frame": { "name": "selfDestruct" } }
+  ],
+  "queueWindows": [
+    { "name": "a short queue goes whole", "length": 3, "index": 1, "offset": 0, "count": 3 },
+    { "name": "exactly the cap goes whole", "length": 1000, "index": 900, "offset": 0, "count": 1000 },
+    { "name": "a long queue starts 50 before the current track", "length": 3000, "index": 2000, "offset": 1950, "count": 1000 },
+    { "name": "near the start the window starts at zero", "length": 3000, "index": 10, "offset": 0, "count": 1000 },
+    { "name": "near the end the window is shorter", "length": 1200, "index": 1150, "offset": 1100, "count": 100 }
+  ],
+  "follow": [
+    {
+      "name": "an idle device follows the peer that is playing",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "now": 20,
+      "expect": { "action": "follow", "peerID": "phone" }
+    },
+    {
+      "name": "a device playing its own audio follows nothing",
+      "local": { "rendering": true, "hasTrack": true, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a paused device that has not played since launch follows",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "now": 20,
+      "expect": { "action": "follow", "peerID": "phone" }
+    },
+    {
+      "name": "pausing does not hand a device to a peer that was already playing",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "stoppedAt": 50 },
+      "peers": [{ "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "now": 60,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a paused device follows a peer that started after it stopped",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "stoppedAt": 50 },
+      "peers": [{ "id": "mac", "isPlaying": true, "hasTrack": true, "playStartedAt": 55 }],
+      "now": 60,
+      "expect": { "action": "follow", "peerID": "mac" }
+    },
+    {
+      "name": "the most recent start wins",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [
+        { "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 },
+        { "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 30 },
+        { "id": "mac", "isPlaying": true, "hasTrack": true, "playStartedAt": 20 }
+      ],
+      "now": 40,
+      "expect": { "action": "follow", "peerID": "phone" }
+    },
+    {
+      "name": "a tie goes to the smaller device ID",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [
+        { "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 30 },
+        { "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 30 }
+      ],
+      "now": 40,
+      "expect": { "action": "follow", "peerID": "phone" }
+    },
+    {
+      "name": "a paused peer is not followed",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": false, "hasTrack": true, "stoppedAt": 10 }],
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a peer playing with no track is not followed",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": false, "playStartedAt": 10 }],
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a peer driving another device is not followed",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10, "controllingPeerID": "tv" }],
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a peer driving this device is not followed",
+      "local": { "deviceID": "mac", "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10, "controllingPeerID": "mac" }],
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a device in a group session follows nothing",
+      "local": { "rendering": false, "hasTrack": true, "inSession": true },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a group follower is not a candidate but its leader is",
+      "local": { "rendering": false, "hasTrack": false, "inSession": false },
+      "peers": [
+        { "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 30, "sessionID": "room", "leaderID": "phone" },
+        { "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10, "sessionID": "room", "leaderID": "phone" }
+      ],
+      "now": 40,
+      "expect": { "action": "follow", "peerID": "phone" }
+    },
+    {
+      "name": "a peer that expired is skipped during its cooldown",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "dropped": { "id": "phone", "until": 50 },
+      "now": 20,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a peer that expired is followed again after its cooldown",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 }],
+      "dropped": { "id": "phone", "until": 50 },
+      "now": 60,
+      "expect": { "action": "follow", "peerID": "phone" }
+    },
+    {
+      "name": "a follower stays with a peer that keeps playing",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "followingID": "phone" },
+      "peers": [
+        { "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10 },
+        { "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 30 }
+      ],
+      "now": 40,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a follower stays attached when its peer pauses",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "followingID": "phone" },
+      "peers": [{ "id": "phone", "isPlaying": false, "hasTrack": true, "stoppedAt": 30 }],
+      "now": 40,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a follower switches to a peer that started after its peer paused",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "followingID": "phone" },
+      "peers": [
+        { "id": "phone", "isPlaying": false, "hasTrack": true, "stoppedAt": 30 },
+        { "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 35 }
+      ],
+      "now": 40,
+      "expect": { "action": "follow", "peerID": "tv" }
+    },
+    {
+      "name": "a follower does not switch to a peer that was already playing",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "followingID": "phone" },
+      "peers": [
+        { "id": "phone", "isPlaying": false, "hasTrack": true, "stoppedAt": 30 },
+        { "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 20 }
+      ],
+      "now": 40,
+      "expect": { "action": "none" }
+    },
+    {
+      "name": "a follower detaches when its peer leaves the network",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "followingID": "phone" },
+      "peers": [{ "id": "tv", "isPlaying": true, "hasTrack": true, "playStartedAt": 20 }],
+      "now": 40,
+      "expect": { "action": "detach", "reason": "peer left the network" }
+    },
+    {
+      "name": "a follower detaches when its peer starts driving another device",
+      "local": { "rendering": false, "hasTrack": true, "inSession": false, "followingID": "phone" },
+      "peers": [{ "id": "phone", "isPlaying": true, "hasTrack": true, "playStartedAt": 10, "controllingPeerID": "tv" }],
+      "now": 40,
+      "expect": { "action": "detach", "reason": "peer is a controller" }
+    }
+  ]
+}
