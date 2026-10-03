@@ -505,7 +505,11 @@ same on every platform, and the follow scenarios in the fixtures file pin them.
   peer sees this device start after it stopped.
 - After sending anything that changes the track (`next`, `previous`,
   `handoff`, `skipTo`), ignore frames that still report the old `trackID` for
-  up to 2.5 s. Otherwise the mirror flickers back to the old song.
+  up to 2.5 s, once the mirror already shows another track. Otherwise the
+  mirror flickers back to the old song. Until the mirror moves, such a frame
+  changes nothing a listener sees and is applied as usual. `previous` arms
+  this only within the first 4 s of a track, because later it restarts the
+  same track.
 - Resolve the mirrored queue's IDs against the server in batches, current
   track first, and cache them by `queueRevision`.
 
