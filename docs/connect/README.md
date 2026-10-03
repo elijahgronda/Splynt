@@ -35,6 +35,24 @@ The exact authority algorithm remains an implementation decision. It must allow
 coordination to transfer among outputs that are already playing, survive a
 coordinator departure, and avoid automatically waking an idle output.
 
+## Active device
+
+Whichever Splynt device is playing is the active device. Every other Splynt
+app on the same account and network shows that playback as if it were local:
+the track, a progress bar that moves with it, play state, shuffle, repeat,
+volume and the queue. Every control on those apps drives the active device,
+and none of them plays audio. A strip under the player names the device, as
+Spotify's "Playing on" strip does.
+
+The device picker lists this device first. Picking it moves playback here
+with the same queue, track and position, and pauses the device that was
+playing. The exact follow rules, including when an idle app starts following
+and when it lets go, are in [WIRE-V1.md](WIRE-V1.md#following-the-active-device).
+
+Only the device rendering audio saves the play queue to the server. A device
+that is following, or that holds a queue it has not played, leaves the
+server's copy alone, because that copy belongs to whoever played last.
+
 ## Handoff
 
 Handoff moves playback to a selected output while retaining session identity,

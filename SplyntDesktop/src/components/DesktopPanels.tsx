@@ -10,6 +10,7 @@ import { useAnchoredMenu } from "../hooks/useAnchoredMenu";
 import { useArtworkColor } from "../hooks/useArtworkColor";
 import { useMenuFocus } from "../hooks/useMenuFocus";
 import type { PlaybackController } from "../hooks/usePlayback";
+import { deviceName, hasRemoteControl } from "../lib/connectFollow";
 import { externalProviderLabel } from "../lib/externalSource";
 import type {
   ArtistSummary, ConnectCommand, ConnectPeer, ConnectSnapshot, ContextPanelMode, LyricsResult, PlaylistSummary, SongSummary,
@@ -40,6 +41,8 @@ type ContextPanelProps = {
   /// see it, so it could not offer the one action a listener in that state
   /// wants: bring the audio back here.
   remoteDeviceId?: string;
+  /// Moves playback from the followed device to this computer.
+  onPlayHere: () => void;
   onResize: (event: ReactPointerEvent) => void;
   onResizeKey: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onSend: (peerId: string, command: ConnectCommand) => void;
@@ -83,6 +86,8 @@ export function DesktopContextPanel(props: ContextPanelProps) {
           onSend={props.onSend}
           onStartGroup={props.onStartGroup}
           onStopGroup={props.onStopGroup}
+          localPlaying={props.playback.rendering}
+          onPlayHere={props.onPlayHere}
           remoteDeviceId={props.remoteDeviceId}
           snapshot={props.connect}
         />
@@ -139,7 +144,7 @@ function NowPlayingPanel({ artist, artistFollowed, liked, onOpenAlbum, onOpenArt
       {next && (
         <article className="now-panel__card">
           <div className="now-panel__card-heading"><p className="now-panel__card-label">Next in queue</p><button onClick={onOpenQueue} type="button">Open queue</button></div>
-          <button className="now-panel__next" onClick={() => playback.playQueue(playback.queue, playback.index + 1, true, 0, playback.contextLabel)} type="button">
+          <button className="now-panel__next" onClick={() => playback.skipTo(playback.index + 1)} type="button">
             <MediaArtwork alt="" className="queue-row__art" coverArt={next.coverArt} />
             <span><strong>{next.title}</strong><small>{next.artist}</small></span>
           </button>
@@ -182,9 +187,12 @@ function QueueList({ onSaveQueue, playback }: { onSaveQueue: () => void; playbac
   const [dragging, setDragging] = useState<number>();
   const [dragTarget, setDragTarget] = useState<number>();
   if (!playback.queue.length) return <PanelEmpty icon={ListMusic} text="Your queue is empty." />;
+  // Another device's queue can be played from and added to, but no wire
+  // command removes or reorders its rows, so those tools are not offered.
+  const remote = playback.remote;
   const manualStart = playback.index + 1;
   const contextStart = manualStart + playback.manualQueueCount;
-  const canReorder = (index: number) => index >= manualStart && index < contextStart;
+  const canReorder = (index: number) => !remote && index >= manualStart && index < contextStart;
   const beginDrag = (event: ReactDragEvent, index: number) => {
     if (!canReorder(index)) { event.preventDefault(); return; }
     event.dataTransfer.effectAllowed = "move";
@@ -200,12 +208,13 @@ function QueueList({ onSaveQueue, playback }: { onSaveQueue: () => void; playbac
   };
   return (
     <div className="queue-list">
-      {playback.undoQueueLabel && <div className="queue-undo" role="status"><span>{playback.undoQueueLabel}</span><button onClick={playback.undoQueueMutation} type="button">Undo</button></div>}
+      {remote && <p className="queue-remote-note">{remote.controls ? `The queue on ${remote.name}` : `Update Splynt on ${remote.name} to change its queue from here`}</p>}
+      {!remote && playback.undoQueueLabel && <div className="queue-undo" role="status"><span>{playback.undoQueueLabel}</span><button onClick={playback.undoQueueMutation} type="button">Undo</button></div>}
       {playback.queue.map((song, index) => (
         <Fragment key={`${song.id}-${index}`}>
           {index === playback.index && <p className="queue-section-label">Now playing</p>}
-          {index === manualStart && playback.manualQueueCount > 0 && <div className="queue-section-label"><span>Next in queue</span><button onClick={playback.clearManualQueue} type="button">Clear queue</button></div>}
-          {index === contextStart && index > playback.index && <div className="queue-section-label"><span>Next from: {playback.contextLabel}</span><button onClick={playback.clearUpcoming} type="button">Clear</button></div>}
+          {index === manualStart && playback.manualQueueCount > 0 && <div className="queue-section-label"><span>Next in queue</span>{!remote && <button onClick={playback.clearManualQueue} type="button">Clear queue</button>}</div>}
+          {index === contextStart && index > playback.index && <div className="queue-section-label"><span>Next from: {playback.contextLabel}</span>{!remote && <button onClick={playback.clearUpcoming} type="button">Clear</button>}</div>}
         <div
           className={`${index === playback.index ? "queue-row queue-row--active" : "queue-row"}${dragging === index ? " queue-row--dragging" : ""}${dragTarget === index ? " queue-row--drop-target" : ""}`}
           draggable={canReorder(index)}
@@ -215,12 +224,12 @@ function QueueList({ onSaveQueue, playback }: { onSaveQueue: () => void; playbac
           onDragStart={(event) => beginDrag(event, index)}
           onDrop={(event) => drop(event, index)}
         >
-          <button className="queue-row__main" onClick={() => playback.playQueue(playback.queue, index, true, 0, playback.contextLabel)} type="button">
+          <button className="queue-row__main" onClick={() => playback.skipTo(index)} type="button">
             <MediaArtwork alt="" className="queue-row__art" coverArt={song.coverArt} />
             <span><strong>{song.title}</strong><small>{song.artist}</small></span>
             {index === playback.index && playback.isPlaying && <span className="playing-bars" aria-label="Playing"><i /><i /><i /></span>}
           </button>
-          {index !== playback.index && (
+          {index !== playback.index && !remote && (
             <span className="queue-row__tools">
               {canReorder(index) && <button aria-label={`Reorder ${song.title}`} className="queue-row__grip" data-queue-reorder={index} onKeyDown={(event) => {
                 if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
@@ -247,16 +256,10 @@ function activeLyricIndex(lyrics: LyricsResult, position: number) {
     : -1;
 }
 
-/// A desktop peer defaults to the OS computer name, which arrives over Bonjour
-/// as `Something.local`. Nobody calls their laptop that. Mirrors
-/// `SplyntConnectPeer.displayName` on the Swift side.
-function deviceName(peer: ConnectPeer) {
-  return peer.name.toLowerCase().endsWith(".local") ? peer.name.slice(0, -6) : peer.name;
-}
 
 /// One glyph for every device made the picker read as a list of identical
 /// phones. The platform string is already on the wire; nothing was using it.
-function DeviceIcon({ platform, size = 21 }: { platform: string; size?: number }) {
+export function DeviceIcon({ platform, size = 21 }: { platform: string; size?: number }) {
   if (platform === "tvOS" || platform === "Apple TV") return <Tv size={size} />;
   if (platform === "iPhone" || platform === "iOS") return <Smartphone size={size} />;
   if (platform === "macOS" || platform === "Windows" || platform === "Linux") return <Laptop size={size} />;
@@ -267,38 +270,58 @@ function DeviceIcon({ platform, size = 21 }: { platform: string; size?: number }
 /// session every row looked identical, and which device leads is the thing a
 /// listener most needs to read off this panel.
 function roleBadge(peer: ConnectPeer, remoteDeviceId?: string, groupId?: string) {
-  if (peer.id === remoteDeviceId) return "You control this";
+  if (peer.id === remoteDeviceId) return peer.playback.isPlaying ? "Playing" : "Paused";
   if (groupId && peer.commitment?.sessionID === groupId) return "In this session";
   if (peer.commitment?.controllingPeerID) return "Acting as a remote";
   if (peer.commitment?.sessionID) return "In another session";
   return undefined;
 }
 
-function ConnectPanel({ canHandoff, groupId, onMoveHere, onMoveToDevice, onSend, onStartGroup, onStopGroup, remoteDeviceId, snapshot }: {
+function ConnectPanel({ canHandoff, groupId, localPlaying, onMoveHere, onMoveToDevice, onPlayHere, onSend, onStartGroup, onStopGroup, remoteDeviceId, snapshot }: {
   canHandoff: boolean;
   groupId?: string;
+  /// This computer's own audio is playing.
+  localPlaying: boolean;
   onMoveHere: (peer: ConnectPeer) => void;
   onMoveToDevice: (peer: ConnectPeer) => void;
+  onPlayHere: () => void;
   onSend: (peerId: string, command: ConnectCommand) => void;
   onStartGroup: () => void;
   onStopGroup: () => void;
   remoteDeviceId?: string;
   snapshot: ConnectSnapshot;
 }) {
+  const followed = snapshot.peers.find((peer) => peer.id === remoteDeviceId);
+  const localActive = !followed;
   return (
     <div className="connect-panel">
-      <div className="connect-local">
+      {/* This computer is a device in the list like any other, as Spotify's
+          picker has it. Choosing it while another device plays brings the
+          playback here; while this computer is the one playing, it is
+          already chosen. */}
+      <button
+        aria-label="This computer"
+        aria-pressed={localActive}
+        className={localActive ? "connect-local connect-local--active" : "connect-local"}
+        disabled={localActive}
+        onClick={onPlayHere}
+        title={localActive ? "Playing on this computer" : `Move playback from ${followed ? deviceName(followed) : "that device"} to this computer`}
+        type="button"
+      >
         <MonitorSpeaker size={21} />
-        <span><strong>This computer</strong><small>{snapshot.isAvailable ? "Visible on your local network" : "Local discovery unavailable"}</small></span>
+        <span>
+          <strong>This computer</strong>
+          <small>{!snapshot.isAvailable ? "Local discovery unavailable" : localActive ? (localPlaying ? "Playing here" : "Visible on your local network") : "Select to play here"}</small>
+        </span>
         <i className={snapshot.isAvailable ? "connect-dot connect-dot--online" : "connect-dot"} />
-      </div>
-      {canHandoff && snapshot.peers.length > 0 && (
+      </button>
+      {canHandoff && !remoteDeviceId && snapshot.peers.length > 0 && (
         <button className={groupId ? "group-session group-session--active" : "group-session"} onClick={groupId ? onStopGroup : onStartGroup} type="button">
           <MonitorSpeaker size={18} /><span><strong>{groupId ? "End group session" : `Play on all ${snapshot.peers.length + 1} devices`}</strong><small>{groupId ? "This computer is keeping the group in sync." : "Start a synchronized session with the players below."}</small></span>
         </button>
       )}
       {snapshot.peers.length ? snapshot.peers.map((peer) => (
-        <section className="connect-device" key={peer.id}>
+        <section className={peer.id === remoteDeviceId ? "connect-device connect-device--active" : "connect-device"} key={peer.id}>
           <div className="connect-device__identity">
             <DeviceIcon platform={peer.platform} />
             <span>
@@ -315,9 +338,12 @@ function ConnectPanel({ canHandoff, groupId, onMoveHere, onMoveToDevice, onSend,
               <span><strong>{peer.playback.title}</strong><small>{peer.playback.artist}</small></span>
             </div><PlaybackProgress className="connect-device__progress" duration={peer.playback.duration} isPlaying={peer.playback.isPlaying} onSeek={(value) => onSend(peer.id, { name: "seek", value })} position={peer.playback.position} /></>
           )}
+          {peer.id === remoteDeviceId && !hasRemoteControl(peer.playback) && (
+            <p className="connect-device__note">Shuffle, repeat, volume and the queue need a Splynt update on {deviceName(peer)}.</p>
+          )}
           <div className="connect-device__controls">
             <button aria-label={`Previous on ${deviceName(peer)}`} onClick={() => onSend(peer.id, { name: "previous" })} type="button"><SkipBack fill="currentColor" size={16} /></button>
-            <button aria-label={`${peer.playback.isPlaying ? "Pause" : "Play"} on ${deviceName(peer)}`} onClick={() => onSend(peer.id, { name: peer.playback.isPlaying ? "pause" : "play" })} type="button">{peer.playback.isPlaying ? <Pause fill="currentColor" size={17} /> : <Play fill="currentColor" size={17} />}</button>
+            <button aria-label={`${peer.playback.isPlaying ? "Pause" : "Resume"} on ${deviceName(peer)}`} onClick={() => onSend(peer.id, { name: peer.playback.isPlaying ? "pause" : "play" })} type="button">{peer.playback.isPlaying ? <Pause fill="currentColor" size={17} /> : <Play fill="currentColor" size={17} />}</button>
             <button aria-label={`Next on ${deviceName(peer)}`} onClick={() => onSend(peer.id, { name: "next" })} type="button"><SkipForward fill="currentColor" size={16} /></button>
           </div>
           {/* One primary per row, and while this computer is driving a device
