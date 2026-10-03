@@ -202,6 +202,27 @@ export type ConnectPlayback = {
   isPlaying: boolean;
   position: number;
   duration: number;
+  /// The remote control extension in `docs/connect/WIRE-V1.md`. A peer that
+  /// sends none of these is a v1 peer, and its shuffle, repeat, volume and
+  /// queue controls are disabled rather than faked.
+  shuffle?: boolean;
+  repeatMode?: string;
+  volume?: number;
+  queueRevision?: number;
+  queueIndex?: number;
+  queueLength?: number;
+  contextLabel?: string;
+};
+
+/// A device's queue, or the 1,000-ID window of it one frame carries. `index`
+/// counts from the start of the whole queue, so the current track is
+/// `trackIDs[index - offset]`.
+export type ConnectQueue = {
+  revision: number;
+  offset: number;
+  index: number;
+  trackIDs: string[];
+  contextLabel?: string;
 };
 
 export type ConnectPeer = {
@@ -268,13 +289,20 @@ export type ConnectTimeProbe = {
 };
 
 export type ConnectCommand = {
-  name: "play" | "pause" | "toggle" | "previous" | "next" | "seek" | "handoff" | "groupJoin" | "groupSync" | "groupLeave" | "groupAccept" | "groupDecline" | "timePing" | "timePong";
+  name: "play" | "pause" | "toggle" | "previous" | "next" | "seek" | "handoff" | "groupJoin" | "groupSync" | "groupLeave" | "groupAccept" | "groupDecline" | "timePing" | "timePong"
+    | "setShuffle" | "setRepeat" | "setVolume" | "skipTo" | "enqueue" | "playNext" | "queueRequest" | "queueState";
   value?: number;
   handoff?: ConnectHandoff;
   group?: ConnectGroup;
   groupJoin?: ConnectGroupJoin;
   groupReply?: ConnectGroupReply;
   time?: ConnectTimeProbe;
+  queue?: ConnectQueue;
+  queueItem?: { index: number; trackID: string };
+  tracks?: { trackIDs: string[] };
+  /// Set by the transport on a received command: the peer whose connection
+  /// carried it. Never on the wire.
+  from?: string;
 };
 
 export type ConnectSnapshot = {
@@ -285,6 +313,8 @@ export type ConnectSnapshot = {
   /// Milliseconds to add to this device's clock to read each peer's, keyed by
   /// peer id. A peer that has not answered a probe yet is absent.
   clockOffsets?: Record<string, number>;
+  /// The latest queue each live peer answered a `queueRequest` with.
+  queues?: Record<string, ConnectQueue>;
 };
 
 export type ContextPanelMode = "nowPlaying" | "queue" | "connect";
