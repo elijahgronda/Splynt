@@ -638,13 +638,24 @@ pub(crate) async fn get_songs_by_ids(
     });
     let results: Vec<Result<Option<SongSummary>, String>> =
         stream::iter(requests).buffered(8).collect().await;
+    // One song that no longer resolves, such as an `ext-` id that has moved,
+    // used to fail the whole batch, and a mirrored or handed-off queue lost
+    // every track around it. Only a batch where nothing resolved is an error.
     let mut songs = Vec::with_capacity(results.len());
+    let mut first_error = None;
     for result in results {
-        if let Some(song) = result? {
-            songs.push(song);
+        match result {
+            Ok(Some(song)) => songs.push(song),
+            Ok(None) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    Ok(songs)
+    match first_error {
+        Some(error) if songs.is_empty() => Err(error),
+        _ => Ok(songs),
+    }
 }
 
 #[tauri::command]

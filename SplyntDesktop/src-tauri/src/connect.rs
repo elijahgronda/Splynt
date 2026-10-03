@@ -21,6 +21,12 @@ const SERVICE_TYPE: &str = "_spliceconnect._tcp.local.";
 const MAX_CONNECTIONS: usize = 64;
 const MAX_PENDING_COMMANDS: usize = 256;
 const MAX_HANDOFF_TRACKS: usize = 1_000;
+/// How far before the current track a long queue's window starts.
+const QUEUE_WINDOW_LEAD: usize = 50;
+/// IDs and labels on the wire are bounded so one frame cannot carry an
+/// arbitrarily large string into the webview.
+const MAX_ID_BYTES: usize = 1_024;
+const MAX_LABEL_BYTES: usize = 256;
 /// Wire contract: an unterminated buffer larger than this is discarded.
 const MAX_BUFFERED_FRAME: usize = 262_144;
 /// Eight clock samples over the 24 s the heartbeat takes to collect them.
@@ -37,19 +43,49 @@ const CLOCK_RETENTION: Duration = Duration::from_secs(30);
 /// and a state frame still decoded but always read as idle. The renames below
 /// are the whole fix; do not remove one because it looks redundant next to the
 /// container's camelCase rule.
+///
+/// Absent optionals are omitted rather than written as null, matching Swift's
+/// synthesized encoding, which is what the contract asks encoders to emit.
+///
+/// The fields after `duration` are the remote control extension. A peer that
+/// sends none of them is a v1 peer, and the webview disables the controls
+/// they back rather than pretending to drive them.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectPlayback {
-    #[serde(rename = "trackID")]
+    #[serde(rename = "trackID", default, skip_serializing_if = "Option::is_none")]
     pub(crate) track_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) album: Option<String>,
-    #[serde(rename = "coverArtID")]
+    #[serde(
+        rename = "coverArtID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) cover_art_id: Option<String>,
     pub(crate) is_playing: bool,
     pub(crate) position: f64,
     pub(crate) duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shuffle: Option<bool>,
+    /// `off`, `all` or `one`. Kept as a string so a value this build does not
+    /// know cannot make the whole frame undecodable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repeat_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) volume: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue_index: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context_label: Option<String>,
 }
 
 /// What a device is currently committed to, published on every state frame.
@@ -142,7 +178,39 @@ pub(crate) struct ConnectTimeProbe {
     pub(crate) t3: Option<f64>,
 }
 
+/// A device's queue, or the window of it that fits in one frame. `index` counts
+/// from the start of the whole queue, so the current track is
+/// `track_ids[index - offset]`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectQueue {
+    pub(crate) revision: i64,
+    pub(crate) offset: i64,
+    pub(crate) index: i64,
+    #[serde(rename = "trackIDs")]
+    pub(crate) track_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context_label: Option<String>,
+}
+
+/// A queue row, by position and by identity, so a receiver whose queue moved
+/// since the controller read it can still find the right track or refuse.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectQueueItem {
+    pub(crate) index: i64,
+    #[serde(rename = "trackID")]
+    pub(crate) track_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectTracks {
+    #[serde(rename = "trackIDs")]
+    pub(crate) track_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectCommand {
     pub(crate) name: String,
@@ -158,6 +226,72 @@ pub(crate) struct ConnectCommand {
     pub(crate) group_reply: Option<ConnectGroupReply>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) time: Option<ConnectTimeProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) queue: Option<ConnectQueue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) queue_item: Option<ConnectQueueItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tracks: Option<ConnectTracks>,
+}
+
+impl ConnectCommand {
+    pub(crate) fn named(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::default()
+        }
+    }
+}
+
+/// A command as the webview receives it: the wire command plus the peer whose
+/// connection delivered it. `from` never goes on the wire; it is how the
+/// webview tells the device it follows from a third one sending it commands.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeliveredCommand {
+    #[serde(flatten)]
+    pub(crate) command: ConnectCommand,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) from: Option<String>,
+}
+
+/// The queue the app last published, whole. The transport cuts the window
+/// when it answers a request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocalQueue {
+    pub(crate) revision: i64,
+    pub(crate) index: i64,
+    #[serde(rename = "trackIDs")]
+    pub(crate) track_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) context_label: Option<String>,
+}
+
+/// The slice of a queue one `queueState` carries: the whole queue when it fits,
+/// otherwise 1,000 IDs starting 50 before the current track.
+pub(crate) fn queue_window(length: usize, index: usize) -> std::ops::Range<usize> {
+    if length <= MAX_HANDOFF_TRACKS {
+        return 0..length;
+    }
+    let start = index
+        .saturating_sub(QUEUE_WINDOW_LEAD)
+        .min(length.saturating_sub(1));
+    start..length.min(start + MAX_HANDOFF_TRACKS)
+}
+
+impl LocalQueue {
+    fn state(&self) -> ConnectQueue {
+        let index = self.index.max(0) as usize;
+        let window = queue_window(self.track_ids.len(), index);
+        ConnectQueue {
+            revision: self.revision,
+            offset: window.start as i64,
+            index: self.index.max(0),
+            track_ids: self.track_ids[window].to_vec(),
+            context_label: self.context_label.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,10 +300,12 @@ pub(crate) struct ConnectSnapshot {
     pub(crate) is_available: bool,
     pub(crate) local_device_id: Option<String>,
     pub(crate) peers: Vec<ConnectPeer>,
-    pub(crate) commands: Vec<ConnectCommand>,
+    pub(crate) commands: Vec<DeliveredCommand>,
     /// Milliseconds to add to this device's clock to read each peer's, keyed
     /// by peer id. Absent until that peer answers a probe.
     pub(crate) clock_offsets: HashMap<String, f64>,
+    /// The latest `queueState` each live peer sent, keyed by peer id.
+    pub(crate) queues: HashMap<String, ConnectQueue>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -210,8 +346,13 @@ struct Runtime {
     alive: AtomicBool,
     authentication: String,
     local_peer: Mutex<ConnectPeer>,
+    /// When the webview last published playback. A frame written later, the
+    /// heartbeat included, moves a playing position forward by the gap.
+    published_at: Mutex<Instant>,
+    local_queue: Mutex<Option<LocalQueue>>,
     peers: Mutex<HashMap<String, PeerEntry>>,
-    commands: Mutex<Vec<ConnectCommand>>,
+    peer_queues: Mutex<HashMap<String, ConnectQueue>>,
+    commands: Mutex<Vec<DeliveredCommand>>,
     routes: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>,
     service_routes: Mutex<HashMap<String, String>>,
     discovered: Mutex<HashMap<String, DiscoveredService>>,
@@ -296,7 +437,10 @@ impl SplyntConnectState {
                 updated_at: apple_reference_time(),
                 commitment: None,
             }),
+            published_at: Mutex::new(Instant::now()),
+            local_queue: Mutex::new(None),
             peers: Mutex::new(HashMap::new()),
+            peer_queues: Mutex::new(HashMap::new()),
             commands: Mutex::new(Vec::new()),
             routes: Mutex::new(HashMap::new()),
             service_routes: Mutex::new(HashMap::new()),
@@ -349,7 +493,28 @@ pub(crate) fn publish_connect_playback(
     peer.commitment = commitment;
     peer.updated_at = apple_reference_time();
     drop(peer);
+    if let Ok(mut published_at) = runtime.published_at.lock() {
+        *published_at = Instant::now();
+    }
     broadcast_state(&runtime);
+    Ok(())
+}
+
+/// Stores the queue this device plays from, so the transport can answer a
+/// peer's `queueRequest` without waiting on the webview. `None` clears it,
+/// and a device with nothing loaded then answers nothing.
+#[tauri::command]
+pub(crate) fn publish_connect_queue(
+    queue: Option<LocalQueue>,
+    state: tauri::State<'_, SplyntConnectState>,
+) -> Result<(), String> {
+    let Some(runtime) = state.runtime() else {
+        return Ok(());
+    };
+    *runtime
+        .local_queue
+        .lock()
+        .map_err(|_| "Splynt Connect queue is unavailable.".to_string())? = queue;
     Ok(())
 }
 
@@ -362,6 +527,7 @@ pub(crate) fn connect_snapshot(state: tauri::State<'_, SplyntConnectState>) -> C
             peers: Vec::new(),
             commands: Vec::new(),
             clock_offsets: HashMap::new(),
+            queues: HashMap::new(),
         };
     };
     let cutoff = Instant::now() - Duration::from_secs(12);
@@ -378,6 +544,16 @@ pub(crate) fn connect_snapshot(state: tauri::State<'_, SplyntConnectState>) -> C
             .cmp(&left.playback.is_playing)
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
+    let live: Vec<String> = peers.keys().cloned().collect();
+    drop(peers);
+    let queues = runtime
+        .peer_queues
+        .lock()
+        .map(|mut queues| {
+            queues.retain(|peer_id, _| live.contains(peer_id));
+            queues.clone()
+        })
+        .unwrap_or_default();
     let commands = runtime
         .commands
         .lock()
@@ -390,6 +566,7 @@ pub(crate) fn connect_snapshot(state: tauri::State<'_, SplyntConnectState>) -> C
         peers: values,
         commands,
         clock_offsets: best_clock_offsets(&runtime),
+        queues,
     }
 }
 
@@ -554,18 +731,13 @@ fn probe_clocks(runtime: &Arc<Runtime>) {
                 authentication: runtime.authentication.clone(),
                 peer: None,
                 command: Some(ConnectCommand {
-                    name: "timePing".to_string(),
-                    value: None,
-                    handoff: None,
-                    group: None,
-                    group_join: None,
-                    group_reply: None,
                     time: Some(ConnectTimeProbe {
                         id,
                         t1,
                         t2: None,
                         t3: None,
                     }),
+                    ..ConnectCommand::named("timePing")
                 }),
             },
         );
@@ -762,8 +934,13 @@ fn handle_wire(
             if !valid_peer(&peer) {
                 return;
             }
+            sanitize_playback(&mut peer.playback);
             peer.updated_at = apple_reference_time();
+            let mut changed = true;
             if let Ok(mut peers) = runtime.peers.lock() {
+                changed = peers
+                    .get(&peer.id)
+                    .is_none_or(|previous| peer_changed(previous, &peer));
                 peers.insert(
                     peer.id.clone(),
                     PeerEntry {
@@ -771,6 +948,12 @@ fn handle_wire(
                         received_at: Instant::now(),
                     },
                 );
+            }
+            // The webview polls once a second. A device that follows this
+            // peer has to see a track change sooner than that, so a frame
+            // that changes what a listener would see wakes it at once.
+            if changed {
+                announce("connect-peers-changed");
             }
             if let Ok(mut routes) = runtime.routes.lock() {
                 routes.insert(peer.id.clone(), writer.clone());
@@ -808,13 +991,8 @@ fn handle_wire(
                                 authentication: runtime.authentication.clone(),
                                 peer: None,
                                 command: Some(ConnectCommand {
-                                    name: "timePong".to_string(),
-                                    value: None,
-                                    handoff: None,
-                                    group: None,
-                                    group_join: None,
-                                    group_reply: None,
                                     time: Some(reply),
+                                    ..ConnectCommand::named("timePong")
                                 }),
                             },
                         );
@@ -826,20 +1004,58 @@ fn handle_wire(
                         }
                         return;
                     }
+                    // Answered here, like a clock probe, from the queue the
+                    // webview last published. Waiting on a poll tick would add
+                    // up to a second to every mirrored queue change.
+                    "queueRequest" => {
+                        let queue = runtime
+                            .local_queue
+                            .lock()
+                            .ok()
+                            .and_then(|queue| queue.as_ref().map(LocalQueue::state));
+                        if let Some(queue) = queue {
+                            let _ = send_wire(
+                                writer,
+                                &WireMessage {
+                                    kind: "command".to_string(),
+                                    authentication: runtime.authentication.clone(),
+                                    peer: None,
+                                    command: Some(ConnectCommand {
+                                        queue: Some(queue),
+                                        ..ConnectCommand::named("queueState")
+                                    }),
+                                },
+                            );
+                        }
+                        return;
+                    }
+                    "queueState" => {
+                        let (Some(queue), Some(peer_id)) =
+                            (command.queue, peer_for(runtime, writer))
+                        else {
+                            return;
+                        };
+                        if let Ok(mut queues) = runtime.peer_queues.lock() {
+                            queues.insert(peer_id, queue);
+                        }
+                        announce("connect-peers-changed");
+                        return;
+                    }
                     _ => {}
                 }
+                let from = peer_for(runtime, writer);
                 if let Ok(mut commands) = runtime.commands.lock() {
                     if commands.len() >= MAX_PENDING_COMMANDS {
                         let overflow = commands.len() - MAX_PENDING_COMMANDS + 1;
                         commands.drain(..overflow);
                     }
-                    commands.push(command)
+                    commands.push(DeliveredCommand { command, from })
                 }
                 // The buffer stays the delivery mechanism, so a command that
                 // lands before the webview is listening is still applied. This
                 // only removes the wait for the next poll tick, which cost
                 // every remote action up to a second before it was even seen.
-                announce_pending_commands();
+                announce("connect-commands-pending");
                 broadcast_state(runtime);
             }
         }
@@ -931,9 +1147,80 @@ fn valid_command(command: &ConnectCommand) -> bool {
             command.group_reply.as_ref().is_some_and(valid_group_reply)
         }
         "timePing" | "timePong" => command.time.as_ref().is_some_and(valid_time_probe),
+        "setShuffle" => command
+            .value
+            .is_some_and(|value| value == 0.0 || value == 1.0),
+        "setRepeat" => command
+            .value
+            .is_some_and(|value| value == 0.0 || value == 1.0 || value == 2.0),
+        "setVolume" => command
+            .value
+            .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value)),
+        "skipTo" => command
+            .queue_item
+            .as_ref()
+            .is_some_and(|item| item.index >= 0 && valid_id(&item.track_id)),
+        "enqueue" | "playNext" => command.tracks.as_ref().is_some_and(|tracks| {
+            !tracks.track_ids.is_empty()
+                && tracks.track_ids.len() <= MAX_HANDOFF_TRACKS
+                && tracks.track_ids.iter().all(|id| valid_id(id))
+        }),
+        "queueRequest" => true,
+        "queueState" => command.queue.as_ref().is_some_and(valid_queue),
         _ => false,
     };
     shape_valid
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ID_BYTES
+}
+
+fn valid_queue(queue: &ConnectQueue) -> bool {
+    queue.revision >= 0
+        && queue.offset >= 0
+        && queue.index >= 0
+        && queue.track_ids.len() <= MAX_HANDOFF_TRACKS
+        && queue.track_ids.iter().all(|id| valid_id(id))
+        && queue
+            .context_label
+            .as_ref()
+            .is_none_or(|label| label.len() <= MAX_LABEL_BYTES)
+}
+
+/// Drops an extension field that is out of range rather than the whole frame.
+/// A peer with one bad value is still a peer, and refusing its state would
+/// make it vanish from the picker.
+fn sanitize_playback(playback: &mut ConnectPlayback) {
+    if playback
+        .volume
+        .is_some_and(|volume| !volume.is_finite() || !(0.0..=1.0).contains(&volume))
+    {
+        playback.volume = None;
+    }
+    for value in [
+        &mut playback.queue_revision,
+        &mut playback.queue_index,
+        &mut playback.queue_length,
+    ] {
+        if value.is_some_and(|number| number < 0) {
+            *value = None;
+        }
+    }
+    if playback
+        .repeat_mode
+        .as_ref()
+        .is_some_and(|mode| mode.len() > 16)
+    {
+        playback.repeat_mode = None;
+    }
+    if playback
+        .context_label
+        .as_ref()
+        .is_some_and(|label| label.len() > MAX_LABEL_BYTES)
+    {
+        playback.context_label = None;
+    }
 }
 
 fn valid_handoff(handoff: &ConnectHandoff) -> bool {
@@ -1015,10 +1302,17 @@ fn broadcast_state(runtime: &Arc<Runtime>) {
 }
 
 fn send_state(runtime: &Arc<Runtime>, connection: &Arc<Mutex<TcpStream>>) -> bool {
+    let since_publish = runtime
+        .published_at
+        .lock()
+        .map(|at| at.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
     let peer = match runtime.local_peer.lock() {
         Ok(mut peer) => {
             peer.updated_at = apple_reference_time();
-            peer.clone()
+            let mut frame = peer.clone();
+            frame.playback.position = position_at_send(&frame.playback, since_publish);
+            frame
         }
         Err(_) => return false,
     };
@@ -1032,6 +1326,22 @@ fn send_state(runtime: &Arc<Runtime>, connection: &Arc<Mutex<TcpStream>>) -> boo
         },
     )
     .is_ok()
+}
+
+/// Where a playing track has reached by the time a frame is written. The
+/// heartbeat used to resend the last published position, up to three seconds
+/// stale, and a receiver projecting from its own receive time then drew a
+/// progress bar that jumped backwards every heartbeat.
+fn position_at_send(playback: &ConnectPlayback, since_publish: f64) -> f64 {
+    if !playback.is_playing || !since_publish.is_finite() || since_publish <= 0.0 {
+        return playback.position;
+    }
+    let moved = playback.position + since_publish;
+    if playback.duration > 0.0 {
+        moved.min(playback.duration)
+    } else {
+        moved
+    }
 }
 
 fn send_wire(connection: &Arc<Mutex<TcpStream>>, message: &WireMessage) -> Result<(), String> {
@@ -1069,10 +1379,49 @@ pub(crate) fn set_app_handle(handle: AppHandle) {
     let _ = APP_HANDLE.set(handle);
 }
 
-fn announce_pending_commands() {
+fn announce(event: &str) {
     if let Some(handle) = APP_HANDLE.get() {
-        let _ = handle.emit("connect-commands-pending", ());
+        let _ = handle.emit(event, ());
     }
+}
+
+/// The peer a connection belongs to, once it has sent a state frame.
+fn peer_for(runtime: &Arc<Runtime>, writer: &Arc<Mutex<TcpStream>>) -> Option<String> {
+    runtime.routes.lock().ok().and_then(|routes| {
+        routes
+            .iter()
+            .find(|(_, candidate)| Arc::ptr_eq(candidate, writer))
+            .map(|(peer_id, _)| peer_id.clone())
+    })
+}
+
+/// Whether a frame changes anything a follower shows. Position moves on every
+/// frame, so it counts only when it jumps, which is a seek.
+fn peer_changed(previous: &PeerEntry, next: &ConnectPeer) -> bool {
+    let old = &previous.peer.playback;
+    let new = &next.playback;
+    let expected = if old.is_playing {
+        old.position + previous.received_at.elapsed().as_secs_f64()
+    } else {
+        old.position
+    };
+    old.track_id != new.track_id
+        || old.is_playing != new.is_playing
+        || old.shuffle != new.shuffle
+        || old.repeat_mode != new.repeat_mode
+        || old.volume != new.volume
+        || old.queue_revision != new.queue_revision
+        || old.queue_index != new.queue_index
+        || old.context_label != new.context_label
+        || (new.position - expected).abs() > 1.5
+        || previous
+            .peer
+            .commitment
+            .as_ref()
+            .map(|c| &c.controlling_peer_id)
+            != next.commitment.as_ref().map(|c| &c.controlling_peer_id)
+        || previous.peer.commitment.as_ref().map(|c| &c.session_id)
+            != next.commitment.as_ref().map(|c| &c.session_id)
 }
 
 pub(crate) fn persistent_device_id() -> String {
@@ -1180,11 +1529,196 @@ pub(crate) fn fingerprint(server: &str, username: &str, password: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        clock_estimate, drain_frames, fingerprint, valid_command, valid_handoff, valid_peer,
-        ConnectCommand, ConnectCommitment, ConnectGroup, ConnectGroupJoin, ConnectGroupReply,
-        ConnectHandoff, ConnectPeer, ConnectPlayback, ConnectTimeProbe, WireMessage,
+        clock_estimate, drain_frames, fingerprint, position_at_send, queue_window,
+        sanitize_playback, valid_command, valid_handoff, valid_peer, ConnectCommand,
+        ConnectCommitment, ConnectGroup, ConnectGroupJoin, ConnectGroupReply, ConnectHandoff,
+        ConnectPeer, ConnectPlayback, ConnectTimeProbe, DeliveredCommand, LocalQueue, WireMessage,
         MAX_BUFFERED_FRAME, MAX_HANDOFF_TRACKS,
     };
+    use serde_json::Value;
+
+    /// `docs/connect/wire-fixtures.json`, the file the iOS Swift tests read
+    /// too. Each side asserting the shape it already produced is how the ID
+    /// casing split went unnoticed for months, so both now check one file.
+    const FIXTURES: &str = include_str!("../../../docs/connect/wire-fixtures.json");
+
+    fn fixtures() -> Value {
+        serde_json::from_str(FIXTURES).expect("the shared fixtures file is valid JSON")
+    }
+
+    /// JSON equality where `1` and `1.0` are the same number. Swift writes a
+    /// whole `Double` without the fraction and serde writes it with one, and
+    /// neither is wrong.
+    fn same_json(left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+            (Value::Array(a), Value::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| same_json(x, y))
+            }
+            (Value::Object(a), Value::Object(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(key, x)| b.get(key).is_some_and(|y| same_json(x, y)))
+            }
+            _ => left == right,
+        }
+    }
+
+    fn has_extension(playback: &ConnectPlayback) -> bool {
+        playback.shuffle.is_some()
+            || playback.repeat_mode.is_some()
+            || playback.volume.is_some()
+            || playback.queue_revision.is_some()
+            || playback.queue_index.is_some()
+            || playback.queue_length.is_some()
+            || playback.context_label.is_some()
+    }
+
+    #[test]
+    fn shared_fixture_peers_decode_and_encode_exactly() {
+        let fixtures = fixtures();
+        for case in fixtures["peers"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let frame = &case["frame"];
+            let peer: ConnectPeer = serde_json::from_value(frame.clone())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(valid_peer(&peer), "{name}");
+            assert_eq!(
+                has_extension(&peer.playback),
+                case["extension"].as_bool().unwrap(),
+                "{name}"
+            );
+            let encoded = serde_json::to_value(&peer).unwrap();
+            assert!(
+                same_json(&encoded, frame),
+                "{name}\n  wrote {encoded}\n  fixture {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_fixture_commands_match_the_bounds_and_encode_exactly() {
+        let fixtures = fixtures();
+        for case in fixtures["commands"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let frame = &case["frame"];
+            let expected = case["valid"].as_bool().unwrap();
+            let command: Option<ConnectCommand> = serde_json::from_value(frame.clone()).ok();
+            let valid = command.as_ref().is_some_and(valid_command);
+            assert_eq!(valid, expected, "{name}");
+            if let Some(command) = command.filter(|_| expected) {
+                let encoded = serde_json::to_value(&command).unwrap();
+                assert!(
+                    same_json(&encoded, frame),
+                    "{name}\n  wrote {encoded}\n  fixture {frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_fixture_queue_windows() {
+        let fixtures = fixtures();
+        for case in fixtures["queueWindows"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let window = queue_window(
+                case["length"].as_u64().unwrap() as usize,
+                case["index"].as_u64().unwrap() as usize,
+            );
+            assert_eq!(
+                window.start as u64,
+                case["offset"].as_u64().unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                window.len() as u64,
+                case["count"].as_u64().unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    /// A long queue answers with a window, and the index still counts from
+    /// the start of the whole queue so a follower can place the current row.
+    #[test]
+    fn a_queue_request_is_answered_with_a_window_of_the_published_queue() {
+        let queue = LocalQueue {
+            revision: 9,
+            index: 2_000,
+            track_ids: (0..3_000).map(|n| format!("id-{n}")).collect(),
+            context_label: Some("Liked Songs".into()),
+        };
+        let state = queue.state();
+        assert_eq!(state.offset, 1_950);
+        assert_eq!(state.index, 2_000);
+        assert_eq!(state.track_ids.len(), MAX_HANDOFF_TRACKS);
+        assert_eq!(
+            state.track_ids[(state.index - state.offset) as usize],
+            "id-2000"
+        );
+        let mut command = ConnectCommand::named("queueState");
+        command.queue = Some(state);
+        assert!(valid_command(&command));
+    }
+
+    /// The heartbeat resent the last published position, up to three seconds
+    /// old, so a follower's bar jumped back every heartbeat.
+    #[test]
+    fn a_frame_written_after_publishing_carries_the_position_reached_by_then() {
+        let mut playback = ConnectPlayback {
+            is_playing: true,
+            position: 40.0,
+            duration: 42.0,
+            ..ConnectPlayback::default()
+        };
+        assert_eq!(position_at_send(&playback, 1.5), 41.5);
+        assert_eq!(
+            position_at_send(&playback, 3.0),
+            42.0,
+            "clamped to the track"
+        );
+        playback.is_playing = false;
+        assert_eq!(
+            position_at_send(&playback, 3.0),
+            40.0,
+            "a paused clock stands still"
+        );
+    }
+
+    /// One bad extension value drops that value, not the whole peer.
+    #[test]
+    fn an_out_of_range_extension_value_is_dropped_on_its_own() {
+        let mut playback = ConnectPlayback {
+            volume: Some(4.0),
+            queue_index: Some(-1),
+            shuffle: Some(true),
+            ..ConnectPlayback::default()
+        };
+        sanitize_playback(&mut playback);
+        assert_eq!(playback.volume, None);
+        assert_eq!(playback.queue_index, None);
+        assert_eq!(playback.shuffle, Some(true));
+    }
+
+    /// The webview needs to know who sent a command. The wire must not carry it.
+    #[test]
+    fn a_delivered_command_names_its_sender_and_the_wire_does_not() {
+        let mut command = ConnectCommand::named("setVolume");
+        command.value = Some(0.5);
+        let delivered = serde_json::to_value(DeliveredCommand {
+            command: command.clone(),
+            from: Some("phone".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            delivered,
+            serde_json::json!({ "name": "setVolume", "value": 0.5, "from": "phone" })
+        );
+        assert!(serde_json::to_value(&command)
+            .unwrap()
+            .get("from")
+            .is_none());
+    }
 
     fn playing_peer() -> ConnectPeer {
         ConnectPeer {
@@ -1200,6 +1734,7 @@ mod tests {
                 is_playing: true,
                 position: 42.25,
                 duration: 218.0,
+                ..ConnectPlayback::default()
             },
             updated_at: 0.0,
             commitment: None,
@@ -1228,15 +1763,7 @@ mod tests {
     }
 
     fn named(name: &str) -> ConnectCommand {
-        ConnectCommand {
-            name: name.into(),
-            value: None,
-            handoff: None,
-            group: None,
-            group_join: None,
-            group_reply: None,
-            time: None,
-        }
+        ConnectCommand::named(name)
     }
 
     #[test]
@@ -1449,6 +1976,7 @@ mod tests {
                 group_join: None,
                 group_reply: None,
                 time: None,
+                ..ConnectCommand::default()
             }),
         };
         assert_eq!(
@@ -1470,6 +1998,7 @@ mod tests {
             group_join: None,
             group_reply: None,
             time: None,
+            ..ConnectCommand::default()
         };
         assert_eq!(
             serde_json::to_value(handoff).unwrap()["handoff"]["currentTrackID"],
@@ -1501,6 +2030,7 @@ mod tests {
             }),
             group_reply: None,
             time: None,
+            ..ConnectCommand::default()
         };
         let value = serde_json::to_value(join).unwrap();
         assert_eq!(value["name"], "groupJoin");
@@ -1526,6 +2056,7 @@ mod tests {
                 t2: None,
                 t3: None,
             }),
+            ..ConnectCommand::default()
         };
         assert_eq!(
             serde_json::to_value(request).unwrap(),
@@ -1548,6 +2079,7 @@ mod tests {
                 t2: Some(1_800_000_000_012.0),
                 t3: Some(1_800_000_000_013.0),
             }),
+            ..ConnectCommand::default()
         };
         let value = serde_json::to_value(reply).unwrap();
         assert_eq!(value["time"]["t2"], 1_800_000_000_012.0_f64);
@@ -1648,6 +2180,7 @@ mod tests {
                 reason: None,
             }),
             time: None,
+            ..ConnectCommand::default()
         };
         assert_eq!(
             serde_json::to_value(accept).unwrap(),
