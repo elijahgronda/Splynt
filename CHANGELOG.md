@@ -6,6 +6,39 @@ iPhone builds go out on [TestFlight](https://testflight.apple.com/join/UWvEDqQc)
 
 ## Desktop
 
+### 1.2.0, 2026-10-06
+
+The queue finally works like the iPhone app, plus a bunch of stuff that was
+only on iOS before.
+
+- The queue is draggable now. Up Next is one list like on the iPhone, so you
+  can move songs you queued in between the album or playlist songs and the
+  other way around.
+- Shuffle reorders the queue for real. What the queue shows is what plays
+  next, and songs you add with shuffle on play next instead of landing
+  somewhere random.
+- Clicking a song in the queue doesn't wipe the songs you queued anymore, and
+  songs you already played don't pile up at the top.
+- You can see Autoplay in the queue. On the last song it tells you what it's
+  gonna continue with, and the new songs get added before the song ends, so
+  there's no gap and crossfade works into them.
+- When a song won't play, it tries once more and then gives you Retry,
+  Continue or Start Radio, instead of skipping through your whole queue.
+- Listening History and Stats! Stats pulls from Navidrome, so the numbers
+  match your phone: top songs, artists, albums, minutes listened, when you
+  listen, and streaks.
+- Indexed lyric search! Search finds songs by a line of the lyrics. It indexes
+  your server in the background, and Settings shows how far it's got.
+- "You liked" on artist pages opens your liked songs by just that artist.
+- Splynt Connect follows whatever device is playing, like Spotify Connect.
+  Skip on the other device and the song, lyrics and queue all follow, and the
+  player bar turns green while you're controlling it. This works between
+  desktops for now, since the iPhone side isn't in TestFlight yet.
+- Splynt's own green instead of Spotify's.
+- Took the little status dot out of the top bar.
+- Fixed album art going blank on pages where it had loaded before.
+- When the equalizer is flat, audio skips it completely now.
+
 ### 1.1.0, 2026-10-01
 
 The first desktop release from this repo, and the first one actually called

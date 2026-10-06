@@ -1,6 +1,6 @@
 [package]
 name = "splynt-desktop"
-version = "1.1.0"
+version = "1.2.0"
 description = "Splynt music client for macOS, Windows, and Linux"
 authors = ["Splynt"]
 edition = "2021"
