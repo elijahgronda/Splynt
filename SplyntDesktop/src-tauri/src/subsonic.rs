@@ -1,8 +1,12 @@
 use crate::connect::SplyntConnectState;
+use crate::lyrics_index::{
+    is_native, LyricsIndex, LyricsIndexState, LyricsIndexStatus, LyricsMatch, LyricsOrigin,
+};
 use crate::models::{
     AlbumDetail, AlbumList, AlbumSummary, ArtistDetail, ConnectRequest, ConnectedLibrary, Envelope,
-    GenreShelf, HomeOverview, LibraryOverview, LyricsLine, LyricsResult, PlayQueueSnapshot,
-    PlaylistDetail, RadioResult, SearchResults, ServerInfo, SongSummary,
+    GenreShelf, HomeOverview, LibraryOverview, ListeningSnapshot, LyricsLine, LyricsResult,
+    PlayQueueSnapshot, PlayedSong, PlaylistDetail, RadioResult, SearchResults, ServerInfo,
+    ServerPlay, SongSummary,
 };
 use axum::{
     body::Body,
@@ -19,7 +23,7 @@ use sha2::Digest;
 use std::{
     collections::HashSet,
     path::{Path as FilePath, PathBuf},
-    sync::Mutex,
+    sync::{atomic::Ordering, Mutex},
 };
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -37,6 +41,10 @@ pub(crate) struct ServerSession {
     username: String,
     token: String,
     salt: String,
+    /// Held in memory only, for Navidrome's native API, which signs in with
+    /// the password rather than a Subsonic token. Never logged or persisted
+    /// from here; the keyring already holds it for a remembered profile.
+    password: String,
 }
 
 #[derive(Default)]
@@ -267,6 +275,7 @@ async fn establish_session(
             username: request.username,
             token,
             salt,
+            password: request.password,
         });
     Ok(ConnectedLibrary { server, albums })
 }
@@ -728,6 +737,7 @@ pub(crate) async fn get_play_queue(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub(crate) async fn get_lyrics(
     id: String,
@@ -736,13 +746,21 @@ pub(crate) async fn get_lyrics(
     title: Option<String>,
     album: Option<String>,
     duration: Option<f64>,
+    song: Option<SongSummary>,
+    app: tauri::AppHandle,
     state: tauri::State<'_, SessionState>,
 ) -> Result<LyricsResult, String> {
     let session = current_session(&state)?;
     let source = source.as_deref().unwrap_or("auto");
     if source != "lrclib" {
         match server_lyrics(&session, &id).await {
-            Ok(result) if !result.lines.is_empty() => return Ok(result),
+            Ok(result) if !result.lines.is_empty() => {
+                // Lyrics the listener sees become searchable, as on iOS.
+                if let Some(song) = song.filter(|song| song.id == id) {
+                    index_lyrics(&app, song, LyricsOrigin::Server, &result);
+                }
+                return Ok(result);
+            }
             Ok(_) if source == "server" => return Ok(LyricsResult::default()),
             Err(error) if source == "server" => return Err(error),
             _ => {}
@@ -757,9 +775,218 @@ pub(crate) async fn get_lyrics(
     ) else {
         return Ok(LyricsResult::default());
     };
-    Ok(lrclib_lyrics(&artist, &title, album.as_deref(), duration)
+    let result = lrclib_lyrics(&artist, &title, album.as_deref(), duration)
         .await
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if let Some(song) = song.filter(|song| song.id == id) {
+        index_lyrics(&app, song, LyricsOrigin::Lrclib, &result);
+    }
+    Ok(result)
+}
+
+fn lyrics_index_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let session = current_session(&app.state::<SessionState>()).ok()?;
+    let scope = profile_scope(session.base_url.as_str(), &session.username);
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|path| path.join("lyrics").join(format!("{scope}.json")))
+}
+
+/// Runs `apply` on the signed-in account's index, loading it first when the
+/// account changed. `None` when nobody is signed in.
+fn with_lyrics_index<R>(
+    app: &tauri::AppHandle,
+    apply: impl FnOnce(&mut LyricsIndex) -> R,
+) -> Option<R> {
+    let path = lyrics_index_path(app)?;
+    let state = app.state::<LyricsIndexState>();
+    let mut guard = state.index.lock().ok()?;
+    if guard
+        .as_ref()
+        .map(|(loaded, _)| loaded != &path)
+        .unwrap_or(true)
+    {
+        *guard = Some((path.clone(), LyricsIndex::load(&path)));
+    }
+    guard.as_mut().map(|(_, index)| apply(index))
+}
+
+/// Writes the index when it changed, at most every fifteen seconds unless
+/// `force`. A few lyrics viewed just before quitting can be lost; the next
+/// crawl or play puts them back.
+fn persist_lyrics_index(app: &tauri::AppHandle, force: bool) {
+    let state = app.state::<LyricsIndexState>();
+    if !state.dirty.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(mut last) = state.last_save.lock() {
+        if !force && last.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(15)) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let Ok(guard) = state.index.lock() else {
+        return;
+    };
+    if let Some((path, index)) = guard.as_ref() {
+        if index.save(path).is_ok() {
+            state.dirty.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+fn index_lyrics(
+    app: &tauri::AppHandle,
+    song: SongSummary,
+    origin: LyricsOrigin,
+    result: &LyricsResult,
+) {
+    if !is_native(&song.id) || result.lines.is_empty() {
+        return;
+    }
+    let lines: Vec<String> = result.lines.iter().map(|line| line.value.clone()).collect();
+    let changed =
+        with_lyrics_index(app, |index| index.insert(song, origin, &lines)).unwrap_or(false);
+    if changed {
+        app.state::<LyricsIndexState>()
+            .dirty
+            .store(true, Ordering::Relaxed);
+        persist_lyrics_index(app, false);
+    }
+}
+
+fn lyrics_status(app: &tauri::AppHandle) -> LyricsIndexStatus {
+    let state = app.state::<LyricsIndexState>();
+    let (scanned, searchable) = with_lyrics_index(app, |index| index.counts()).unwrap_or_default();
+    LyricsIndexStatus {
+        scanned,
+        searchable,
+        total: state.total.lock().map(|total| *total).unwrap_or_default(),
+        running: state.crawling.load(Ordering::Relaxed),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn search_lyrics(
+    query: String,
+    limit: Option<usize>,
+    app: tauri::AppHandle,
+) -> Vec<LyricsMatch> {
+    with_lyrics_index(&app, |index| {
+        index.search(&query, limit.unwrap_or(50).min(100))
+    })
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub(crate) fn lyrics_index_status(app: tauri::AppHandle) -> LyricsIndexStatus {
+    lyrics_status(&app)
+}
+
+/// Every native song on the server, through Subsonic's empty `search3`.
+async fn all_server_songs(session: &ServerSession) -> Vec<SongSummary> {
+    let mut songs = Vec::new();
+    let mut offset = 0usize;
+    while offset < 200_000 {
+        let offset_text = offset.to_string();
+        let Ok(response) = session_request(
+            session,
+            "search3.view",
+            &[
+                ("query", ""),
+                ("songCount", "500"),
+                ("songOffset", &offset_text),
+                ("artistCount", "0"),
+                ("albumCount", "0"),
+            ],
+        )
+        .await
+        else {
+            break;
+        };
+        let page = response.response.search_result3.unwrap_or_default().songs;
+        let count = page.len();
+        songs.extend(page.into_iter().filter(|song| is_native(&song.id)));
+        if count < 500 {
+            break;
+        }
+        offset += 500;
+    }
+    songs
+}
+
+/// Fills the index from the server, four requests at a time, asking only the
+/// server as iOS does. It resumes where it stopped, because the index
+/// remembers which songs the server already answered for. `rebuild` asks
+/// again for every song. Progress arrives as `lyrics-index-progress`.
+#[tauri::command]
+pub(crate) fn start_lyrics_index(rebuild: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let session = current_session(&app.state::<SessionState>())?;
+    let state = app.state::<LyricsIndexState>();
+    if state.crawling.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    if rebuild {
+        with_lyrics_index(&app, |index| index.forget_server_checks());
+        state.dirty.store(true, Ordering::Relaxed);
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let scope = lyrics_index_path(&handle);
+        let songs = all_server_songs(&session).await;
+        if let Ok(mut total) = handle.state::<LyricsIndexState>().total.lock() {
+            *total = songs.len();
+        }
+        let pending: Vec<SongSummary> = with_lyrics_index(&handle, |index| {
+            songs
+                .into_iter()
+                .filter(|song| !index.is_scanned(&song.id))
+                .collect()
+        })
+        .unwrap_or_default();
+        let _ = handle.emit("lyrics-index-progress", lyrics_status(&handle));
+        let mut answers = stream::iter(pending)
+            .map(|song| {
+                let session = session.clone();
+                async move {
+                    let result = server_lyrics(&session, &song.id).await;
+                    (song, result)
+                }
+            })
+            .buffer_unordered(4);
+        let mut done = 0usize;
+        while let Some((song, result)) = answers.next().await {
+            // Signing out or switching accounts ends this account's crawl.
+            if lyrics_index_path(&handle) != scope {
+                break;
+            }
+            // A network error leaves the song unchecked, so it is asked again.
+            let Ok(result) = result else { continue };
+            let id = song.id.clone();
+            let lines: Vec<String> = result.lines.iter().map(|line| line.value.clone()).collect();
+            with_lyrics_index(&handle, |index| {
+                index.mark_scanned(&id);
+                index.insert(song, LyricsOrigin::Server, &lines);
+            });
+            handle
+                .state::<LyricsIndexState>()
+                .dirty
+                .store(true, Ordering::Relaxed);
+            done += 1;
+            if done.is_multiple_of(25) {
+                persist_lyrics_index(&handle, true);
+                let _ = handle.emit("lyrics-index-progress", lyrics_status(&handle));
+            }
+        }
+        persist_lyrics_index(&handle, true);
+        handle
+            .state::<LyricsIndexState>()
+            .crawling
+            .store(false, Ordering::SeqCst);
+        let _ = handle.emit("lyrics-index-progress", lyrics_status(&handle));
+    });
+    Ok(())
 }
 
 async fn server_lyrics(session: &ServerSession, id: &str) -> Result<LyricsResult, String> {
@@ -910,6 +1137,223 @@ pub(crate) async fn get_radio(
         },
         songs,
     })
+}
+
+/// Navidrome's native sign-in. Older servers answer at `/api/login`, newer
+/// ones at `/auth/login`; both are tried, as iOS does.
+async fn navidrome_token(session: &ServerSession) -> Option<String> {
+    let base = session.base_url.as_str().trim_end_matches('/');
+    let body = serde_json::json!({ "username": session.username, "password": session.password });
+    for path in ["auth/login", "api/login"] {
+        let Ok(response) = session
+            .client
+            .post(format!("{base}/{path}"))
+            .json(&body)
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(value) = response.json::<serde_json::Value>().await else {
+            continue;
+        };
+        if let Some(token) = value.get("token").and_then(|token| token.as_str()) {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+async fn navidrome_page(
+    session: &ServerSession,
+    jwt: &str,
+    path: &str,
+    query: &[(&str, String)],
+) -> Option<Vec<serde_json::Value>> {
+    let base = session.base_url.as_str().trim_end_matches('/');
+    let response = session
+        .client
+        .get(format!("{base}/{path}"))
+        .query(query)
+        .header("X-ND-Authorization", format!("Bearer {jwt}"))
+        .header(header::AUTHORIZATION, format!("Bearer {jwt}"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<Vec<serde_json::Value>>().await.ok()
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|field| field.as_str())
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn json_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(|field| field.as_f64())
+        .filter(|number| *number >= 0.0)
+        .map(|number| number as u32)
+}
+
+/// Every timestamped scrobble, oldest first, in pages of 2,000 up to 100,000.
+async fn navidrome_scrobbles(session: &ServerSession, jwt: &str) -> Option<Vec<ServerPlay>> {
+    let page_size = 2_000;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let mut offset = 0;
+    let mut seen = HashSet::new();
+    let mut plays = Vec::new();
+    while offset < 100_000 {
+        let page = navidrome_page(
+            session,
+            jwt,
+            "api/scrobble",
+            &[
+                ("from", "0".to_string()),
+                ("to", now.to_string()),
+                ("_sort", "submission_time".to_string()),
+                ("_order", "ASC".to_string()),
+                ("_start", offset.to_string()),
+                ("_end", (offset + page_size).to_string()),
+            ],
+        )
+        .await?;
+        if page.is_empty() {
+            break;
+        }
+        let before = plays.len();
+        for row in &page {
+            let Some(id) = row.get("id").map(|id| id.to_string()) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let (Some(track_id), Some(at)) = (
+                json_string(row, "mediaFileId"),
+                row.get("submissionTime").and_then(|time| time.as_i64()),
+            ) else {
+                continue;
+            };
+            plays.push(ServerPlay { track_id, at });
+        }
+        if page.len() < page_size || plays.len() == before {
+            break;
+        }
+        offset += page_size;
+    }
+    Some(plays)
+}
+
+/// Songs with a play count, most played first, in pages of 500 up to 20,000.
+async fn navidrome_played_songs(session: &ServerSession, jwt: &str) -> Option<Vec<PlayedSong>> {
+    let page_size = 500;
+    let mut offset = 0;
+    let mut seen = HashSet::new();
+    let mut songs = Vec::new();
+    while offset < 20_000 {
+        let page = navidrome_page(
+            session,
+            jwt,
+            "api/song",
+            &[
+                ("_sort", "play_count".to_string()),
+                ("_order", "DESC".to_string()),
+                ("_start", offset.to_string()),
+                ("_end", (offset + page_size).to_string()),
+            ],
+        )
+        .await?;
+        if page.is_empty() {
+            break;
+        }
+        let mut played = 0;
+        let mut fresh = 0;
+        for row in &page {
+            let play_count = json_u32(row, "playCount").unwrap_or(0);
+            if play_count == 0 {
+                continue;
+            }
+            played += 1;
+            let Some(id) = json_string(row, "id") else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            fresh += 1;
+            let album_id = json_string(row, "albumId");
+            songs.push(PlayedSong {
+                song: SongSummary {
+                    id,
+                    title: json_string(row, "title").unwrap_or_default(),
+                    artist: json_string(row, "artist").unwrap_or_default(),
+                    artist_id: json_string(row, "artistId"),
+                    album: json_string(row, "album").unwrap_or_default(),
+                    // Navidrome serves an album's cover under the album id,
+                    // which is what iOS asks for too.
+                    cover_art: album_id.clone(),
+                    album_id,
+                    duration: row
+                        .get("duration")
+                        .and_then(|value| value.as_f64())
+                        .map(|seconds| seconds.round() as u64),
+                    track: json_u32(row, "trackNumber"),
+                    disc_number: json_u32(row, "discNumber"),
+                    year: json_u32(row, "year").filter(|year| *year > 0),
+                    suffix: json_string(row, "suffix"),
+                    bit_rate: json_u32(row, "bitRate"),
+                    starred: None,
+                    created: None,
+                    explicit_status: json_string(row, "explicitStatus"),
+                },
+                play_count,
+                genre: json_string(row, "genre"),
+            });
+        }
+        if page.len() < page_size || played < page.len() || fresh == 0 {
+            break;
+        }
+        offset += page_size;
+    }
+    Some(songs)
+}
+
+/// The listening record Stats reads. `None` when the server is not
+/// Navidrome, or offers neither half; the page then falls back to the plays
+/// logged on this computer, as iOS does.
+#[tauri::command]
+pub(crate) async fn load_listening_snapshot(
+    state: tauri::State<'_, SessionState>,
+) -> Result<Option<ListeningSnapshot>, String> {
+    let session = current_session(&state)?;
+    let Some(jwt) = navidrome_token(&session).await else {
+        return Ok(None);
+    };
+    let (plays, played_songs) = futures_util::future::join(
+        navidrome_scrobbles(&session, &jwt),
+        navidrome_played_songs(&session, &jwt),
+    )
+    .await;
+    if plays.is_none() && played_songs.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ListeningSnapshot {
+        plays,
+        played_songs,
+    }))
 }
 
 #[tauri::command]
@@ -1759,14 +2203,10 @@ async fn proxy_media_http(
     let mut builder = Response::builder()
         .status(status)
         .header("Access-Control-Allow-Origin", "*")
-        .header(
-            "Cache-Control",
-            if kind == "cover" {
-                "private, max-age=86400"
-            } else {
-                "no-store"
-            },
-        );
+        // A successful cover returned above, so a cover reaching here is an
+        // error. Caching it for a day kept a passing server hiccup on screen
+        // as missing artwork for the rest of the session.
+        .header("Cache-Control", "no-store");
     for name in [
         header::CONTENT_TYPE,
         header::CONTENT_LENGTH,

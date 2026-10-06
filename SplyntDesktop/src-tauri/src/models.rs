@@ -88,6 +88,35 @@ pub(crate) struct SongSummary {
     pub(crate) explicit_status: Option<String>,
 }
 
+/// One timestamped play from Navidrome's scrobble history.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServerPlay {
+    pub(crate) track_id: String,
+    /// Seconds since the Unix epoch.
+    pub(crate) at: i64,
+}
+
+/// A song the server has a play count for, with the tags Stats groups by.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlayedSong {
+    #[serde(flatten)]
+    pub(crate) song: SongSummary,
+    pub(crate) play_count: u32,
+    pub(crate) genre: Option<String>,
+}
+
+/// The connected Navidrome user's listening record, as iOS reads it. Either
+/// half is absent when the server does not offer it: timestamped history is
+/// newer and opt-in, and plain Subsonic servers have neither.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListeningSnapshot {
+    pub(crate) plays: Option<Vec<ServerPlay>>,
+    pub(crate) played_songs: Option<Vec<PlayedSong>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AlbumDetail {

@@ -1,5 +1,6 @@
 mod connect;
 mod diagnostics;
+mod lyrics_index;
 mod models;
 mod subsonic;
 
@@ -243,6 +244,7 @@ pub fn run() {
         )
         .manage(BackgroundPlayback::default())
         .manage(SessionState::default())
+        .manage(lyrics_index::LyricsIndexState::default())
         .manage(DownloadState::default())
         .manage(PlaybackPrefsState::default())
         .manage(SplyntConnectState::default())
@@ -333,6 +335,10 @@ pub fn run() {
             subsonic::get_play_queue,
             subsonic::get_lyrics,
             subsonic::get_radio,
+            subsonic::load_listening_snapshot,
+            subsonic::search_lyrics,
+            subsonic::lyrics_index_status,
+            subsonic::start_lyrics_index,
             subsonic::scrobble,
             subsonic::add_song_to_playlist,
             subsonic::add_songs_to_playlist,
