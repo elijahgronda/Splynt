@@ -20,13 +20,18 @@ export function MediaArtwork({
   fallback = "album",
 }: MediaArtworkProps) {
   const [source, setSource] = useState(() => coverArt ? coverCache.get(coverArt) : undefined);
-  const [failed, setFailed] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  // Load and failure are recorded against the URL they happened to, not as
+  // flags the effect resets. A cover already in the image cache can fire
+  // `load` before this component's effect runs, and resetting a plain
+  // `loaded` flag there left that cover at opacity 0 for good. That is why
+  // artwork that had shown before went blank on the next page that used it.
+  const [loadedSource, setLoadedSource] = useState<string>();
+  const [failedSource, setFailedSource] = useState<string>();
+  const loaded = source !== undefined && loadedSource === source;
+  const failed = source !== undefined && failedSource === source;
 
   useEffect(() => {
     let active = true;
-    setFailed(false);
-    setLoaded(false);
     if (!coverArt) {
       setSource(undefined);
       return;
@@ -42,7 +47,7 @@ export function MediaArtwork({
         coverCache.set(coverArt, url);
         setSource(url);
       })
-      .catch(() => active && setFailed(true));
+      .catch(() => { if (active) setSource(undefined); });
     return () => { active = false };
   }, [coverArt]);
 
@@ -57,7 +62,17 @@ export function MediaArtwork({
   return (
     <span className={classes.filter(Boolean).join(" ")}>
       {source && !failed ? (
-        <img alt={alt} className={loaded ? "is-loaded" : undefined} draggable={false} onError={() => setFailed(true)} onLoad={() => setLoaded(true)} src={source} />
+        <img
+          alt={alt}
+          className={loaded ? "is-loaded" : undefined}
+          draggable={false}
+          onError={() => setFailedSource(source)}
+          onLoad={() => setLoadedSource(source)}
+          // An image the webview already holds can be complete before React
+          // attaches `onLoad`, and then no load event arrives at all.
+          ref={(image) => { if (image?.complete && image.naturalWidth > 0 && loadedSource !== source) setLoadedSource(source); }}
+          src={source}
+        />
       ) : (
         <Icon aria-hidden="true" />
       )}
