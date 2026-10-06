@@ -143,6 +143,27 @@ export type RadioResult = {
   songs: SongSummary[];
 };
 
+/// A song whose lyrics hold every word searched for, with the words in context.
+export type LyricsMatch = { song: SongSummary; snippet: string };
+
+/// How far the lyrics index has got. `total` is 0 until a crawl has listed
+/// the server's songs this session.
+export type LyricsIndexStatus = { scanned: number; searchable: number; total: number; running: boolean };
+
+/// The connected Navidrome user's listening record. Either half is null when
+/// the server does not offer it.
+export type ListeningSnapshot = {
+  plays: { trackId: string; at: number }[] | null;
+  playedSongs: (SongSummary & { playCount: number; genre?: string })[] | null;
+};
+
+/// What the queue says about Autoplay while the last queued song plays, as
+/// on iOS. `seed` is the song the continuation was fetched for.
+export type AutoplayStatus =
+  | { state: "preparing"; label: string; seed: string }
+  | { state: "ready"; label: string; seed: string; songs: SongSummary[] }
+  | { state: "unavailable"; label: string; seed: string };
+
 export type DownloadItem = {
   song: SongSummary;
   bytes: number;
@@ -176,10 +197,14 @@ export type DesktopRoute =
   | { kind: "home" }
   | { kind: "search" }
   | { kind: "library" }
-  | { kind: "liked" }
+  /// With `artist`, Liked Songs narrowed to that artist, opened from the
+  /// artist page as on iOS.
+  | { kind: "liked"; artist?: { id: string; name: string } }
   | { kind: "downloads" }
   | { kind: "profile" }
   | { kind: "settings" }
+  | { kind: "history" }
+  | { kind: "stats" }
   | { kind: "radio"; id: string; title: string }
   | { kind: "album"; id: string }
   | { kind: "playlist"; id: string }

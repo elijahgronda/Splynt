@@ -27,13 +27,14 @@ type PlayerBarProps = {
   /// how the bar says so.
   remoteDevice?: { id: string; name: string };
   onOpenDevices: () => void;
+  onStartRadio: () => void;
 };
 
 function iconClass(active: boolean) {
   return active ? "player-icon player-icon--active" : "player-icon";
 }
 
-export function PlayerBar({ expanded, playback, panelMode, lyricsOpen, onOpenAlbum, onOpenArtist, onOpenDevices, onOpenPanel, onToggleExpanded, onToggleLike, onToggleLyrics, liked, remoteDevice }: PlayerBarProps) {
+export function PlayerBar({ expanded, playback, panelMode, lyricsOpen, onOpenAlbum, onOpenArtist, onOpenDevices, onOpenPanel, onToggleExpanded, onToggleLike, onToggleLyrics, liked, remoteDevice, onStartRadio }: PlayerBarProps) {
   const VolumeIcon = playback.volume === 0 ? VolumeX : playback.volume < 0.55 ? Volume1 : Volume2;
   const external = Boolean(parseExternalSource(playback.current?.id));
   const repeatLabel = playback.repeat === "off" ? "Enable repeat" : playback.repeat === "all" ? "Enable repeat one" : "Disable repeat";
@@ -68,8 +69,19 @@ export function PlayerBar({ expanded, playback, panelMode, lyricsOpen, onOpenAlb
             {playback.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}
           </button>
         </div>
-        <PlaybackProgress disabled={!playback.current} duration={playback.duration} isPlaying={playback.isPlaying} onSeek={playback.seek} position={playback.position} />
-        {playback.error && <span className="player-error" role="status">{playback.error}</span>}
+        {playback.failed ? (
+          <div className="player-failure" role="alert">
+            <span>{playback.error}</span>
+            <button className="player-failure__primary" onClick={playback.retry} type="button">Retry</button>
+            {playback.hasNext && <button onClick={playback.continueAfterFailure} type="button">Continue</button>}
+            <button onClick={onStartRadio} type="button">Start Radio</button>
+          </div>
+        ) : (
+          <>
+            <PlaybackProgress disabled={!playback.current} duration={playback.duration} isPlaying={playback.isPlaying} onSeek={playback.seek} position={playback.position} />
+            {playback.error && <span className="player-error" role="status">{playback.error}</span>}
+          </>
+        )}
       </div>
 
       <div className="player-actions">

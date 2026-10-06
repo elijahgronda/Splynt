@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Check, ChevronLeft, ChevronRight, Clock3, Home, Download, Heart, Library, List, LogOut, PanelLeftClose, PanelLeftOpen, Pin, Play, Plus,
+  BarChart3, Check, ChevronLeft, ChevronRight, Clock3, History, Home, Download, Heart, Library, List, LogOut, PanelLeftClose, PanelLeftOpen, Pin, Play, Plus,
   Search, Settings, SquareLibrary, UserRound, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,9 +20,9 @@ import { readRecentlyPlayed, rememberPlayed } from "../lib/recentlyPlayed";
 import { useSettings } from "../lib/settings";
 import { useTooltips } from "../hooks/useTooltips";
 import type {
-  AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, ConnectedLibrary, ConnectCommand,
+  AlbumDetail, AlbumSummary, AutoplayStatus, ArtistDetail, ArtistSummary, ConnectedLibrary, ConnectCommand,
   ConnectGroup, ConnectPeer, ConnectSnapshot, ContextPanelMode, DesktopRoute, HomeOverview, HomeShortcut,
-  JumpBackInItem, LibraryOverview, LyricsResult, PlayQueueSnapshot, PlaylistDetail, PlaylistSummary,
+  JumpBackInItem, LibraryOverview, ListeningSnapshot, LyricsIndexStatus, LyricsMatch, LyricsResult, PlayQueueSnapshot, PlaylistDetail, PlaylistSummary,
   RadioResult, SearchResults, SongSummary,
 } from "../types";
 import { readSongDrag, SONG_DRAG_TYPE } from "./Catalog";
@@ -34,6 +34,9 @@ import { MediaArtwork } from "./MediaArtwork";
 import { CollectionMenu, type CollectionMenuState } from "./CollectionMenu";
 import { PlayerBar } from "./PlayerBar";
 import * as Views from "./DesktopViews";
+import { HistoryView, StatsView } from "./ListeningViews";
+import { logPlay, readPlayLog } from "../lib/playLog";
+import { statsInput, type StatsInput } from "../lib/listeningStats";
 
 type AuthenticatedShellProps = {
   library: ConnectedLibrary;
@@ -67,7 +70,15 @@ const emptySearch: SearchResults = { songs: [], albums: [], artists: [] };
 const emptyLyrics: LyricsResult = { synced: false, lines: [] };
 
 function routeKey(route: DesktopRoute) {
+  if (route.kind === "liked" && route.artist) return `liked:${route.artist.id}`;
   return "id" in route ? `${route.kind}:${route.id}` : route.kind;
+}
+
+/// Liked Songs by one artist. Matches the artist id, and the name only for a
+/// song that carries no artist id, as iOS does.
+function likedBy(songs: SongSummary[], artist: { id: string; name: string }) {
+  const name = artist.name.toLocaleLowerCase();
+  return songs.filter((song) => song.artistId ? song.artistId === artist.id : song.artist.toLocaleLowerCase() === name);
 }
 
 function reasonMessage(reason: unknown, fallback: string) {
@@ -138,7 +149,6 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const [homeError, setHomeError] = useState<string>();
   const [libraryError, setLibraryError] = useState<string>();
   const [pageError, setPageError] = useState<string>();
-  const [syncingResources, setSyncingResources] = useState(0);
   const [reconnecting, setReconnecting] = useState(false);
   const [leavingSession, setLeavingSession] = useState(false);
   const [toast, setToast] = useState<string>();
@@ -319,7 +329,6 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
 
   const reloadHome = useCallback(() => {
     setHomeError(undefined);
-    setSyncingResources((count) => count + 1);
     invoke<HomeOverview>("load_home").then((raw) => {
       const value: HomeOverview = {
         newest: dedupeAlbums(raw.newest),
@@ -335,11 +344,10 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       const message = reasonMessage(reason, "Home could not be refreshed.");
       setHomeError(message);
       setConnection((current) => ({ status: "offline", message: current.message ?? message }));
-    }).finally(() => setSyncingResources((count) => Math.max(0, count - 1)));
+    });
   }, [library]);
   const reloadLibrary = useCallback(() => {
     setLibraryError(undefined);
-    setSyncingResources((count) => count + 1);
     invoke<LibraryOverview>("load_library").then((value) => {
       const merged = {
         ...value,
@@ -356,7 +364,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       const message = reasonMessage(reason, "Your library could not be refreshed.");
       setLibraryError(message);
       setConnection((current) => ({ status: "offline", message: current.message ?? message }));
-    }).finally(() => setSyncingResources((count) => Math.max(0, count - 1)));
+    });
   }, [library]);
 
   const offline = connection.status === "offline" || settings.offlineMode;
@@ -427,14 +435,111 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     return () => window.clearInterval(interval);
   }, [sleepAt]);
 
+  // A play counts once it finished or ran past 30%, the line iOS uses, and
+  // is logged the moment it crosses it so quitting mid-song still counts.
+  // Seeking back near the start of the same song arms it again.
+  const [playLog, setPlayLog] = useState(() => readPlayLog(profileScope));
+  const loggedPlay = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const song = playback.current;
+    if (!song || remoteDevice) return;
+    if (loggedPlay.current === song.id && playback.position < 2) loggedPlay.current = undefined;
+    if (loggedPlay.current === song.id) return;
+    const total = playback.duration || song.duration || 0;
+    if (!total || playback.position < total * 0.3) return;
+    loggedPlay.current = song.id;
+    setPlayLog(logPlay(profileScope, song));
+  }, [playback.current?.id, playback.duration, playback.position, profileScope, remoteDevice]);
+
+  // Stats read Navidrome's record when the page opens, and fall back to the
+  // log above when the server keeps none.
+  const [statsSource, setStatsSource] = useState<StatsInput>();
+  const [statsLoading, setStatsLoading] = useState(false);
+  useEffect(() => {
+    if (route.kind !== "stats") return;
+    let active = true;
+    setStatsLoading(true);
+    const load = offline ? Promise.resolve(null) : invoke<ListeningSnapshot | null>("load_listening_snapshot").catch(() => null);
+    void load.then((snapshot) => {
+      if (!active) return;
+      setStatsSource(statsInput(snapshot, readPlayLog(profileScope)));
+      setStatsLoading(false);
+    });
+    return () => { active = false };
+  }, [offline, profileScope, route.kind]);
+
+  // Autoplay works as it does on iOS. When the last queued song starts, fetch
+  // what follows it and say so in the queue. The songs join the queue at 75%,
+  // so a crossfade or a gapless join has a next track to reach for, and a
+  // song queued by hand before then still wins.
+  const [autoplay, setAutoplay] = useState<AutoplayStatus>();
+  const autoplayRef = useRef(autoplay);
+  autoplayRef.current = autoplay;
+  const lastInQueue = playback.index >= 0 && playback.index === playback.queue.length - 1;
+  const autoplaySeed = settings.autoplay && !offline && playback.repeat === "off" && !remoteDevice && !groupSession && lastInQueue
+    ? playback.current
+    : undefined;
+  useEffect(() => {
+    if (!autoplaySeed) {
+      setAutoplay(undefined);
+      return;
+    }
+    const seed = autoplaySeed.id;
+    const label = `${autoplaySeed.title} Radio`;
+    let active = true;
+    setAutoplay({ state: "preparing", label, seed });
+    invoke<RadioResult>("get_radio", { seedId: seed, title: label, count: 20 })
+      .then((result) => {
+        if (!active) return;
+        const songs = result.songs.filter((song) => song.id !== seed);
+        setAutoplay(songs.length ? { state: "ready", label, seed, songs } : { state: "unavailable", label, seed });
+      })
+      .catch(() => { if (active) setAutoplay({ state: "unavailable", label, seed }); });
+    return () => { active = false };
+    // Keyed on the seed song alone: a new fetch per song, not per render.
+  }, [autoplaySeed?.id]);
+  useEffect(() => {
+    if (autoplay?.state !== "ready" || autoplay.seed !== playback.current?.id) return;
+    if (!playback.duration || playback.position < playback.duration * 0.75) return;
+    playbackRef.current.appendToQueue(autoplay.songs);
+  }, [autoplay, playback.current?.id, playback.duration, playback.position]);
+
+  // Start Radio after a song failed, as on iOS: seeded from the most recent
+  // library song played, since an external id may not resolve again, and
+  // falling back to the failed song itself.
+  const startRadioAfterFailure = () => {
+    const failedSong = playbackRef.current.current;
+    if (!failedSong) return;
+    const seed = recentlyPlayed.find((song) => song.id !== failedSong.id && !parseExternalSource(song.id)) ?? failedSong;
+    const label = `${seed.title} Radio`;
+    void invoke<RadioResult>("get_radio", { seedId: seed.id, title: label, count: 25 })
+      .then((result) => {
+        const controller = playbackRef.current;
+        if (!controller.failed || controller.current?.id !== failedSong.id) return;
+        const songs = result.songs.filter((song) => song.id !== seed.id && song.id !== failedSong.id);
+        if (!songs.length) {
+          setToast("No playable radio tracks are available");
+          return;
+        }
+        controller.playQueue(songs, 0, true, 0, label);
+      })
+      .catch(() => setToast("No playable radio tracks are available"));
+  };
+
+  // The song ended before the 75% mark was reached, by a seek to the end or
+  // a short track. Use what was already fetched, or fetch it now.
   queueExhausted.current = (last: SongSummary) => {
     if (offline) return;
+    const prepared = autoplayRef.current;
+    if (prepared?.state === "ready" && prepared.seed === last.id) {
+      playbackRef.current.appendToQueue(prepared.songs, true);
+      return;
+    }
     void invoke<RadioResult>("get_radio", { seedId: last.id, title: `${last.title} Radio`, count: 20 })
       .then((result) => {
         const fresh = result.songs.filter((song) => song.id !== last.id);
         if (!fresh.length) return;
-        playbackRef.current.appendToQueue(fresh);
-        playbackRef.current.next();
+        playbackRef.current.appendToQueue(fresh, true);
         setToast("Autoplay continued with similar songs");
       })
       .catch(() => undefined);
@@ -479,6 +584,46 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     }, 220);
     return () => { active = false; window.clearTimeout(timeout); };
   }, [offline, query, route.kind, searchHistoryKey]);
+
+  // Lyrics are searched in the local index, so this works offline too.
+  const [lyricMatches, setLyricMatches] = useState<LyricsMatch[]>([]);
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (route.kind !== "search" || trimmed.length < 3) {
+      setLyricMatches([]);
+      return;
+    }
+    let active = true;
+    const timeout = window.setTimeout(() => {
+      invoke<LyricsMatch[]>("search_lyrics", { query: trimmed, limit: 50 })
+        .then((matches) => { if (active) setLyricMatches(Array.isArray(matches) ? matches : []); })
+        .catch(() => { if (active) setLyricMatches([]); });
+    }, 220);
+    return () => { active = false; window.clearTimeout(timeout); };
+  }, [query, route.kind]);
+
+  const [lyricsIndex, setLyricsIndex] = useState<LyricsIndexStatus>();
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let active = true;
+    void listen<LyricsIndexStatus>("lyrics-index-progress", ({ payload }) => setLyricsIndex(payload))
+      .then((unlisten) => { if (active) dispose = unlisten; else unlisten(); })
+      .catch(() => undefined);
+    return () => { active = false; dispose?.(); };
+  }, []);
+  useEffect(() => {
+    if (route.kind !== "settings") return;
+    void invoke<LyricsIndexStatus>("lyrics_index_status").then(setLyricsIndex).catch(() => undefined);
+  }, [route.kind]);
+
+  // Index the server's lyrics in the background once per sign-in, as iOS
+  // does after a library sync. It resumes where the last run stopped.
+  const lyricsCrawlStarted = useRef(false);
+  useEffect(() => {
+    if (offline || lyricsCrawlStarted.current) return;
+    lyricsCrawlStarted.current = true;
+    void invoke("start_lyrics_index", { rebuild: false }).catch(() => { lyricsCrawlStarted.current = false; });
+  }, [offline]);
 
   useEffect(() => {
     if (!("id" in route) || !(route.kind === "album" || route.kind === "playlist" || route.kind === "artist")) {
@@ -542,6 +687,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       title: playback.current.title,
       album: playback.current.album,
       duration: playback.current.duration,
+      song: playback.current,
     })
       .then((value) => active && setLyrics(value?.lines ? value : emptyLyrics))
       .catch(() => active && setLyrics(emptyLyrics))
@@ -1481,9 +1627,15 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   }, [detail, filterSongs]);
   const shownSearch = useMemo(() => ({ ...searchResults, songs: filterSongs(searchResults.songs) }), [filterSongs, searchResults]);
   const shownLiked = useMemo(() => filterSongs(libraryData.starredSongs), [filterSongs, libraryData.starredSongs]);
+  const likedArtist = route.kind === "liked" ? route.artist : undefined;
+  const shownLikedPage = useMemo(() => likedArtist ? likedBy(shownLiked, likedArtist) : shownLiked, [likedArtist, shownLiked]);
+  const artistLikedCount = useMemo(() => {
+    if (route.kind !== "artist" || !shownDetail || !("albums" in shownDetail)) return 0;
+    return likedBy(libraryData.starredSongs, { id: shownDetail.id, name: shownDetail.name }).length;
+  }, [libraryData.starredSongs, route.kind, shownDetail]);
   const shownRadio = useMemo(() => radioData ? { ...radioData, songs: filterSongs(radioData.songs) } : radioData, [filterSongs, radioData]);
 
-  const visibleSongs = shownDetail && "songs" in shownDetail ? shownDetail.songs : route.kind === "liked" ? shownLiked : route.kind === "downloads" ? downloads.items.map((item) => item.song) : route.kind === "radio" ? shownRadio?.songs ?? [] : shownSearch.songs;
+  const visibleSongs = shownDetail && "songs" in shownDetail ? shownDetail.songs : route.kind === "liked" ? shownLikedPage : route.kind === "downloads" ? downloads.items.map((item) => item.song) : route.kind === "radio" ? shownRadio?.songs ?? [] : shownSearch.songs;
   const selectedSongs = visibleSongs.filter((song, index) => selectedIds.has(`${song.id}-${index}`));
 
   async function addSongsToPlaylist(songs: SongSummary[], playlist: PlaylistSummary) {
@@ -1540,7 +1692,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const startRadio = (song: SongSummary) => navigate({ kind: "radio", id: song.id, title: `${song.title} Radio` });
   const toggleShuffle = () => playback.setShuffle((value) => !value);
   const detailTitle = detail ? ("name" in detail ? detail.name : "title" in detail ? detail.title : undefined) : undefined;
-  const routeTitle = route.kind === "home" ? "Home" : route.kind === "search" ? "Search" : route.kind === "library" ? "Your Library" : route.kind === "liked" ? "Liked Songs" : route.kind === "downloads" ? "Downloads" : route.kind === "profile" ? "Profile" : route.kind === "settings" ? "Settings" : route.kind === "radio" ? route.title : "Splynt";
+  const routeTitle = route.kind === "home" ? "Home" : route.kind === "search" ? "Search" : route.kind === "library" ? "Your Library" : route.kind === "liked" ? "Liked Songs" : route.kind === "downloads" ? "Downloads" : route.kind === "profile" ? "Profile" : route.kind === "settings" ? "Settings" : route.kind === "history" ? "Listening History" : route.kind === "stats" ? "Stats" : route.kind === "radio" ? route.title : "Splynt";
   const visiblePlaylists = settings.hideExternalPlaylists
     ? libraryData.playlists.filter((playlist) => parseExternalSource(playlist.id)?.type !== "playlist")
     : libraryData.playlists;
@@ -1580,7 +1732,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const matchingSearchPlaylists = query.trim()
     ? visiblePlaylists.filter((playlist) => playlist.name.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 30)
     : [];
-  const hasSearchResults = searchResults.songs.length + searchResults.albums.length + searchResults.artists.length + matchingSearchPlaylists.length > 0;
+  const hasSearchResults = searchResults.songs.length + searchResults.albums.length + searchResults.artists.length + matchingSearchPlaylists.length + lyricMatches.length > 0;
   // With no filter the library mixes playlists, followed artists and saved
   // albums, as Spotify's does; a chip narrows it to the whole server list.
   const libraryItems = useMemo<Views.LibraryItem[]>(() => {
@@ -1755,14 +1907,13 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
           </div>
         </nav>
         <div className="global-bar__trailing">
-          <div aria-live="polite" className={`sync-status${offline ? " sync-status--offline" : ""}${syncingResources > 0 ? " sync-status--syncing" : ""}`} title={offline ? connection.message : syncingResources > 0 ? "Refreshing your server library" : "Connected to your music server"}>
-            <i aria-hidden="true" /><span>{offline ? "Offline" : syncingResources > 0 ? "Syncing" : "Online"}</span>
-          </div>
           <AccountMenu
             busy={leavingSession}
             host={library.server.displayHost}
             onOpenChange={setAccountOpen}
+            onHistory={() => navigate({ kind: "history" })}
             onProfile={() => navigate({ kind: "profile" })}
+            onStats={() => navigate({ kind: "stats" })}
             onSettings={() => navigate({ kind: "settings" })}
             onSignOut={() => setSignOutConfirm(true)}
             onSwitchAccount={() => void leaveSession(false)}
@@ -1841,19 +1992,21 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
           )}
           {pageError && <div className="page-error" role="alert">{pageError}<button aria-label="Dismiss error" onClick={() => setPageError(undefined)} type="button"><X size={15} /></button></div>}
           {route.kind === "home" && <Views.HomeView cardMenu={cardMenu} data={homeData} error={homeError} hiddenRows={settings.hiddenHomeRows} jumpBackIn={jumpBackIn} likedAlbums={likedAlbums} onOpen={openAlbum} onOpenJumpBackIn={openJumpBackIn} onOpenShortcut={openHomeShortcut} onPlay={playAlbum} onPlayShortcut={playHomeShortcut} onRetry={reloadHome} rowOrder={settings.homeRowOrder} shortcuts={homeShortcuts} />}
-          {route.kind === "search" && <Views.SearchView cardMenu={cardMenu} data={shownSearch} filter={searchFilter} onFilter={setSearchFilter} hasResults={hasSearchResults} home={homeData} isLoading={searching} onOpenAlbum={openAlbum} onOpenAlbumById={openAlbumById} onOpenArtist={openArtist} onOpenArtistById={openArtistById} onOpenPlaylist={openPlaylist} onPlayAlbum={playAlbum} onPlayArtist={(artist) => void playArtist(artist)} onPlayPlaylist={playPlaylist} onPlaySongs={(songs, index) => startPlayback(songs, index, `Search for ${query}`)} playlists={matchingSearchPlaylists} query={query} songs={songList} />}
+          {route.kind === "search" && <Views.SearchView cardMenu={cardMenu} data={shownSearch} filter={searchFilter} onFilter={setSearchFilter} hasResults={hasSearchResults} home={homeData} isLoading={searching} lyrics={lyricMatches} onPlayLyric={(song) => startPlayback([song], 0, `Lyrics matching "${query.trim()}"`)} onOpenAlbum={openAlbum} onOpenAlbumById={openAlbumById} onOpenArtist={openArtist} onOpenArtistById={openArtistById} onOpenPlaylist={openPlaylist} onPlayAlbum={playAlbum} onPlayArtist={(artist) => void playArtist(artist)} onPlayPlaylist={playPlaylist} onPlaySongs={(songs, index) => startPlayback(songs, index, `Search for ${query}`)} playlists={matchingSearchPlaylists} query={query} songs={songList} />}
           {route.kind === "library" && <Views.LibraryView cardMenu={cardMenu} error={libraryError} filter={libraryFilter} grid={settings.libraryGridView} items={orderedLibraryItems} onToggleGrid={() => updateSetting("libraryGridView", !settings.libraryGridView)} onFilter={setLibraryFilter} onOpenAlbum={openAlbum} onOpenArtist={openArtist} onOpenPlaylist={openPlaylist} onPlayAlbum={playAlbum} onPlayPlaylist={playPlaylist} onRetry={reloadLibrary} />}
-          {route.kind === "liked" && <Views.LikedView {...collectionControls} onPlay={(songs, index) => startPlayback(songs, index, "Liked Songs")} onPlayCollection={playCollection} songList={songList} songs={shownLiked} username={library.server.username} />}
+          {route.kind === "liked" && <Views.LikedView {...collectionControls} artistName={route.artist?.name} onPlay={(songs, index) => startPlayback(songs, index, route.artist ? `Liked Songs · ${route.artist.name}` : "Liked Songs")} onPlayCollection={playCollection} songList={songList} songs={shownLikedPage} username={library.server.username} />}
           {route.kind === "downloads" && <Views.DownloadsView downloads={downloads} onClear={() => setClearDownloadsConfirm(true)} onPlay={(songs, index) => startPlayback(songs, index, "Downloads")} songList={songList} />}
-          {(route.kind === "album" || route.kind === "playlist" || route.kind === "artist") && (pageError && !detail && !pageLoading ? <Views.EmptyState title="This page is unavailable" body="Reconnect to your server, then try again." /> : <Views.DetailView {...collectionControls} artistArt={detailArtistArt} cardMenu={cardMenu} collectionStarred={collectionStarred} detail={shownDetail} downloads={downloads} isLoading={pageLoading} onDownloadCollection={(songs) => void downloadCollection(songs)} onEnlarge={(coverArt, alt) => setLightbox({ coverArt, alt })} onMore={openCurrentCollectionMenu} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onPlay={(songs, index, label) => startPlayback(songs, index, label)} onPlayAlbum={playAlbum} onPlayArtist={(artist) => void playArtist(artist)} onPlayCollection={playCollection} onRadio={startRadio} onRemoveCollection={(songs) => void removeCollection(songs)} onReorder={(from, to) => void reorderCurrentPlaylist(from, to)} onToggleCollectionStar={() => (route.kind === "album" || route.kind === "artist") && void setCollectionStarred(route.kind, route.id, !collectionStarred, detail as AlbumSummary | ArtistSummary | undefined)} ownsPlaylist={ownsCurrentPlaylist} route={route} songList={songList} />)}
+          {(route.kind === "album" || route.kind === "playlist" || route.kind === "artist") && (pageError && !detail && !pageLoading ? <Views.EmptyState title="This page is unavailable" body="Reconnect to your server, then try again." /> : <Views.DetailView {...collectionControls} artistLikedCount={artistLikedCount} onOpenLikedByArtist={(artist) => navigate({ kind: "liked", artist })} artistArt={detailArtistArt} cardMenu={cardMenu} collectionStarred={collectionStarred} detail={shownDetail} downloads={downloads} isLoading={pageLoading} onDownloadCollection={(songs) => void downloadCollection(songs)} onEnlarge={(coverArt, alt) => setLightbox({ coverArt, alt })} onMore={openCurrentCollectionMenu} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onPlay={(songs, index, label) => startPlayback(songs, index, label)} onPlayAlbum={playAlbum} onPlayArtist={(artist) => void playArtist(artist)} onPlayCollection={playCollection} onRadio={startRadio} onRemoveCollection={(songs) => void removeCollection(songs)} onReorder={(from, to) => void reorderCurrentPlaylist(from, to)} onToggleCollectionStar={() => (route.kind === "album" || route.kind === "artist") && void setCollectionStarred(route.kind, route.id, !collectionStarred, detail as AlbumSummary | ArtistSummary | undefined)} ownsPlaylist={ownsCurrentPlaylist} route={route} songList={songList} />)}
           {route.kind === "radio" && <Views.RadioView {...collectionControls} data={shownRadio} isLoading={pageLoading} onPlay={(songs, index) => startPlayback(songs, index, route.title)} onPlayCollection={playCollection} songList={songList} title={route.title} />}
-          {route.kind === "profile" && <Views.ProfileView connectionStatus={connection.status} library={library} overview={libraryData} onDevices={() => openPanel("connect")} onSettings={() => navigate({ kind: "settings" })} onSignOut={() => void leaveSession(false)} />}
-          {route.kind === "settings" && <Views.SettingsView contextWidth={contextWidth} downloads={downloads} library={library} onClearDownloads={() => setClearDownloadsConfirm(true)} onOpenPanel={openPanel} onReload={() => { reloadHome(); reloadLibrary(); }} onResetLayout={() => { setSidebarWidth(280); setContextWidth(350); setToast("Desktop layout reset"); }} onSleep={(minutes) => { setSleepAt(minutes === undefined ? undefined : Date.now() + minutes * 60_000); setToast(minutes === undefined ? "Sleep timer cancelled" : `Playback stops in ${minutes} min`); }} resetSettings={resetSettings} settings={settings} sidebarWidth={sidebarWidth} sleepRemaining={sleepRemaining} updateSetting={updateSetting} />}
+          {route.kind === "profile" && <Views.ProfileView connectionStatus={connection.status} library={library} overview={libraryData} onDevices={() => openPanel("connect")} onHistory={() => navigate({ kind: "history" })} onSettings={() => navigate({ kind: "settings" })} onSignOut={() => void leaveSession(false)} onStats={() => navigate({ kind: "stats" })} />}
+          {route.kind === "history" && <HistoryView onPlay={(songs, index, label) => startPlayback(songs, index, label)} plays={playLog} songList={songList} />}
+          {route.kind === "stats" && <StatsView input={statsSource} loading={statsLoading} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onPlaySong={(song) => startPlayback([song], 0, "Stats")} />}
+          {route.kind === "settings" && <Views.SettingsView contextWidth={contextWidth} downloads={downloads} library={library} lyricsIndex={lyricsIndex} onIndexLyrics={() => void invoke("start_lyrics_index", { rebuild: true }).then(() => invoke<LyricsIndexStatus>("lyrics_index_status")).then(setLyricsIndex).catch(() => setToast("Lyrics indexing could not start"))} onClearDownloads={() => setClearDownloadsConfirm(true)} onOpenPanel={openPanel} onReload={() => { reloadHome(); reloadLibrary(); }} onResetLayout={() => { setSidebarWidth(280); setContextWidth(350); setToast("Desktop layout reset"); }} onSleep={(minutes) => { setSleepAt(minutes === undefined ? undefined : Date.now() + minutes * 60_000); setToast(minutes === undefined ? "Sleep timer cancelled" : `Playback stops in ${minutes} min`); }} resetSettings={resetSettings} settings={settings} sidebarWidth={sidebarWidth} sleepRemaining={sleepRemaining} updateSetting={updateSetting} />}
         </div>
       </main>
 
-      {panelMode && <DesktopContextPanel artist={currentArtist} artistFollowed={currentArtistFollowed} connect={connectState} groupId={groupSession?.id} liked={currentLiked} mode={panelMode} onClose={() => setPanelMode(undefined)} onMoveHere={playPeerHere} onMoveToDevice={movePlaybackTo} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onOpenQueue={() => openPanel("queue")} onResize={beginContextResize} onResizeKey={resizeContextWithKeyboard} onSaveQueue={() => setSaveQueueOpen(true)} onSend={sendRemote} onStartGroup={startGroup} onStopGroup={stopGroup} onToggleFollow={() => playback.current?.artistId && void setCollectionStarred("artist", playback.current.artistId, !currentArtistFollowed, currentArtist)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} playback={playback} recentlyPlayed={recentlyPlayed} remoteDeviceId={remoteDevice?.id} width={contextWidth} />}
-      <PlayerBar expanded={fullPlayer} liked={currentLiked} lyricsOpen={fullPlayer && fullPlayerSurface === "lyrics"} onOpenDevices={() => openPanel("connect")} remoteDevice={remoteDevice} onOpenAlbum={(id) => { setFullPlayer(false); openAlbumById(id); }} onOpenArtist={(id) => { setFullPlayer(false); openArtistById(id); }} onOpenPanel={openPanel} onToggleExpanded={() => setFullPlayer((value) => !value)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} onToggleLyrics={toggleLyrics} panelMode={panelMode} playback={transport} />
+      {panelMode && <DesktopContextPanel artist={currentArtist} artistFollowed={currentArtistFollowed} connect={connectState} groupId={groupSession?.id} liked={currentLiked} mode={panelMode} onClose={() => setPanelMode(undefined)} onMoveHere={playPeerHere} onMoveToDevice={movePlaybackTo} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onOpenQueue={() => openPanel("queue")} onResize={beginContextResize} onResizeKey={resizeContextWithKeyboard} onSaveQueue={() => setSaveQueueOpen(true)} onSend={sendRemote} onStartGroup={startGroup} onStopGroup={stopGroup} onToggleFollow={() => playback.current?.artistId && void setCollectionStarred("artist", playback.current.artistId, !currentArtistFollowed, currentArtist)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} autoplay={autoplay} playback={playback} recentlyPlayed={recentlyPlayed} remoteDeviceId={remoteDevice?.id} width={contextWidth} />}
+      <PlayerBar expanded={fullPlayer} liked={currentLiked} lyricsOpen={fullPlayer && fullPlayerSurface === "lyrics"} onOpenDevices={() => openPanel("connect")} remoteDevice={remoteDevice} onOpenAlbum={(id) => { setFullPlayer(false); openAlbumById(id); }} onOpenArtist={(id) => { setFullPlayer(false); openArtistById(id); }} onOpenPanel={openPanel} onToggleExpanded={() => setFullPlayer((value) => !value)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} onStartRadio={startRadioAfterFailure} onToggleLyrics={toggleLyrics} panelMode={panelMode} playback={transport} />
       {fullPlayer && <FullPlayer onSurface={setFullPlayerSurface} onToggleWindowFullscreen={toggleWindowFullscreen} surface={fullPlayerSurface} windowFullscreen={windowFullscreen} liked={currentLiked} lyrics={lyrics} lyricsAutoScroll={settings.lyricsAutoScroll} lyricsLoading={lyricsLoading} lyricsTextSize={settings.lyricsTextSize} onClose={() => setFullPlayer(false)} onOpenAlbum={(id) => { setFullPlayer(false); openAlbumById(id); }} onOpenArtist={(id) => { setFullPlayer(false); openArtistById(id); }} onOpenPanel={openPanel} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} playback={transport} />}
       {trackMenu && (() => {
         const targets = selectedIds.has(`${trackMenu.song.id}-${trackMenu.index}`) && selectedSongs.length > 1 ? selectedSongs : [trackMenu.song];
@@ -1945,11 +2098,13 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   );
 }
 
-function AccountMenu({ busy, host, onOpenChange, onProfile, onSettings, onSignOut, onSwitchAccount, open, username }: {
+function AccountMenu({ busy, host, onHistory, onOpenChange, onProfile, onSettings, onSignOut, onStats, onSwitchAccount, open, username }: {
   busy: boolean;
   host: string;
+  onHistory: () => void;
   onOpenChange: (open: boolean) => void;
   onProfile: () => void;
+  onStats: () => void;
   onSettings: () => void;
   onSignOut: () => void;
   onSwitchAccount: () => void;
@@ -1992,6 +2147,8 @@ function AccountMenu({ busy, host, onOpenChange, onProfile, onSettings, onSignOu
         <div aria-label="Account" className="account-menu" onKeyDown={onMenuKeyDown} ref={menuRef} role="menu">
           <div className="account-menu__identity"><strong>{username}</strong><small>{host}</small></div>
           <button onClick={() => choose(onProfile)} role="menuitem" type="button"><UserRound size={17} /> Profile</button>
+          <button onClick={() => choose(onStats)} role="menuitem" type="button"><BarChart3 size={17} /> Stats</button>
+          <button onClick={() => choose(onHistory)} role="menuitem" type="button"><History size={17} /> Listening History</button>
           <button onClick={() => choose(onSettings)} role="menuitem" type="button"><Settings size={17} /> Settings</button>
           <div className="account-menu__separator" />
           <button disabled={busy} onClick={() => choose(onSwitchAccount)} role="menuitem" type="button"><UserRound size={17} /> Switch account</button>

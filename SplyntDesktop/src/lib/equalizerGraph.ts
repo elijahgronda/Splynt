@@ -10,8 +10,12 @@
 // 1. `createMediaElementSource` is one-way. Once an element is routed into an
 //    AudioContext its audio only reaches the speakers through that graph, and
 //    there is no API to put it back. So attaching is done lazily, the first
-//    time the listener actually turns the equalizer on, and turning it off
-//    afterwards flattens the filters rather than trying to undo the routing.
+//    time the listener actually turns the equalizer on. Turning it off
+//    flattens the filters at once, and usePlayback swaps a fresh element in
+//    for each routed one the next time that element is idle. That swap is how
+//    the plain path comes back without a relaunch, and it matters: WebKit's
+//    Web Audio path drops out on Bluetooth output and then plays fast to catch
+//    up, which is heard as the pitch jumping (WebKit bug 239696).
 // 2. The element must be CORS-clean or the graph outputs silence. Splynt's
 //    audio comes from its own local media proxy, which already answers with
 //    `Access-Control-Allow-Origin: *` on both the streamed and the downloaded
@@ -88,6 +92,24 @@ export class EqualizerGraph {
       const preamp = active ? Math.pow(10, settings.preampDb / 20) : 1;
       chain.preamp.gain.setTargetAtTime(preamp, now, rampSeconds);
     }
+  }
+
+  /// True when this element is stuck on the Web Audio path while the
+  /// equalizer is off, so the caller should trade it for a fresh one.
+  shouldReplace(element: HTMLMediaElement | undefined): boolean {
+    if (!element || !this.chains.has(element)) return false;
+    return !(this.settings && isEqualizerActive(this.settings));
+  }
+
+  /// Retires a routed element in favour of a fresh one. Once nothing is
+  /// routed the context closes too, so an idle graph is not left rendering
+  /// silence to the output device.
+  replace(old: HTMLMediaElement, fresh: HTMLMediaElement): void {
+    this.forget(old);
+    this.register(fresh);
+    if (this.chains.size) return;
+    void this.context?.close().catch(() => undefined);
+    this.context = undefined;
   }
 
   /// Whether anything is actually routed through Web Audio yet. For tests and

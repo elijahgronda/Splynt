@@ -1,8 +1,9 @@
-import { Coffee, Disc3, Download, HardDrive, Heart, LayoutGrid, List, LoaderCircle, MoreHorizontal, Pause, Play, Radio, RotateCcw, Shuffle, Trash2, X } from "lucide-react";
+import { ChevronRight, Coffee, Disc3, Download, HardDrive, Heart, LayoutGrid, List, LoaderCircle, MoreHorizontal, Pause, Play, Radio, RotateCcw, Shuffle, Trash2, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import type {
+  LyricsIndexStatus, LyricsMatch,
   AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, ConnectedLibrary, ContextPanelMode,
   DesktopRoute, HomeOverview, HomeShortcut, JumpBackInItem, LibraryOverview, PlaylistDetail,
   PlaylistSummary, RadioResult, SearchResults, SongSummary,
@@ -19,7 +20,7 @@ import {
 } from "../lib/settings";
 import { offlineCacheDegraded } from "../lib/persistence";
 
-export const searchFilters = ["all", "songs", "artists", "albums", "playlists"] as const;
+export const searchFilters = ["all", "songs", "lyrics", "artists", "albums", "playlists"] as const;
 export type SearchFilter = (typeof searchFilters)[number];
 
 export type CardMenu = {
@@ -182,7 +183,24 @@ export function pickTopResult(query: string, data: SearchResults, playlists: Pla
   return playlists[0] ? { kind: "playlist", playlist: playlists[0] } : undefined;
 }
 
-export function SearchView({ cardMenu, data, filter, hasResults, home, isLoading, onFilter, onOpenAlbum, onOpenAlbumById, onOpenArtist, onOpenArtistById, onOpenPlaylist, onPlayAlbum, onPlayArtist, onPlayPlaylist, onPlaySongs, playlists, query, songs }: {
+/// Songs found by their lyrics, each with the matching words in context.
+function LyricsMatches({ matches, onPlay }: { matches: LyricsMatch[]; onPlay: (song: SongSummary) => void }) {
+  return (
+    <ol className="lyrics-matches">
+      {matches.map((match) => (
+        <li key={match.song.id}>
+          <button data-search-result onClick={() => onPlay(match.song)} type="button">
+            <MediaArtwork alt="" className="lyrics-matches__art" coverArt={match.song.coverArt} />
+            <span><strong>{match.song.title}</strong><small>{match.song.artist}</small><em>{match.snippet}</em></span>
+          </button>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+export function SearchView({ cardMenu, data, filter, hasResults, home, isLoading, lyrics, onFilter, onOpenAlbum, onOpenAlbumById, onOpenArtist, onOpenArtistById, onOpenPlaylist, onPlayAlbum, onPlayArtist, onPlayLyric, onPlayPlaylist, onPlaySongs, playlists, query, songs }: {
+  lyrics: LyricsMatch[]; onPlayLyric: (song: SongSummary) => void;
   filter: SearchFilter; onFilter: (filter: SearchFilter) => void;
   cardMenu: CardMenu; data: SearchResults; hasResults: boolean; home: HomeOverview; isLoading: boolean;
   onOpenAlbum: (album: AlbumSummary) => void; onOpenArtist: (artist: ArtistSummary) => void; onOpenPlaylist: (playlist: PlaylistSummary) => void;
@@ -220,6 +238,13 @@ export function SearchView({ cardMenu, data, filter, hasResults, home, isLoading
       {data.songs.length > 0 && <section className="result-section search-top__songs"><h2>Songs</h2>{table(data.songs.slice(0, 4), true)}</section>}
     </div>}
     {!isLoading && data.songs.length > 0 && filter === "songs" && <section className="result-section">{table(data.songs, false)}</section>}
+    {!isLoading && filter === "all" && (() => {
+      // Songs already shown above are not repeated as lyric matches.
+      const shown = new Set(data.songs.slice(0, 4).map((song) => song.id));
+      const rest = lyrics.filter((match) => !shown.has(match.song.id)).slice(0, 10);
+      return rest.length > 0 && <section className="result-section"><h2>Lyrics matches</h2><LyricsMatches matches={rest} onPlay={onPlayLyric} /></section>;
+    })()}
+    {!isLoading && filter === "lyrics" && (lyrics.length > 0 ? <section className="result-section"><LyricsMatches matches={lyrics} onPlay={onPlayLyric} /></section> : <EmptyState title="No lyrics match yet" body="Lyrics become searchable as Splynt indexes your server. Settings shows how far it has got." />)}
     {!isLoading && data.artists.length > 0 && (filter === "all" || filter === "artists") && <section className="catalog-shelf"><h2>Artists</h2><div className={filter === "all" ? "catalog-row" : "catalog-grid"}>{data.artists.map((artist) => <ArtistCard artist={artist} key={artist.id} onMenu={(event) => cardMenu.artist(artist, event)} onOpen={onOpenArtist} />)}</div></section>}
     {!isLoading && data.albums.length > 0 && (filter === "all" || filter === "albums") && <section className="catalog-shelf"><h2>Albums</h2><div className={filter === "all" ? "catalog-row" : "catalog-grid"}>{data.albums.map((album) => <AlbumCard album={album} key={album.id} onMenu={(event) => cardMenu.album(album, event)} onOpen={onOpenAlbum} onPlay={onPlayAlbum} />)}</div></section>}
     {!isLoading && playlists.length > 0 && (filter === "all" || filter === "playlists") && <section className="catalog-shelf"><h2>Playlists</h2><div className={filter === "all" ? "catalog-row" : "catalog-grid"}>{playlists.map((playlist) => <PlaylistCard key={playlist.id} onMenu={(event) => cardMenu.playlist(playlist, event)} onOpen={onOpenPlaylist} onPlay={onPlayPlaylist} playlist={playlist} />)}</div></section>}
@@ -300,28 +325,31 @@ export function LibraryChips({ compact, filter, onFilter }: { compact?: boolean;
   </>;
 }
 
-export function LikedView({ compactHeader, onPlay, onPlayCollection, onTogglePlayback, onToggleShuffle, shuffleArmed, songs, songList, username }: CollectionControls & { onPlay: (songs: SongSummary[], index: number) => void; onPlayCollection: (songs: SongSummary[], label: string) => void; songs: SongSummary[]; songList: SongListHandlers; username: string }) {
+export function LikedView({ artistName, compactHeader, onPlay, onPlayCollection, onTogglePlayback, onToggleShuffle, shuffleArmed, songs, songList, username }: CollectionControls & { artistName?: string; onPlay: (songs: SongSummary[], index: number) => void; onPlayCollection: (songs: SongSummary[], label: string) => void; songs: SongSummary[]; songList: SongListHandlers; username: string }) {
   const playing = playsFrom(songs, songList.currentId, songList.isPlaying);
-  const play = () => playing ? onTogglePlayback() : onPlayCollection(songs, "Liked Songs");
+  const label = artistName ? `Liked Songs · ${artistName}` : "Liked Songs";
+  const play = () => playing ? onTogglePlayback() : onPlayCollection(songs, label);
   return (
     <CollectionPage
-      actions={songs.length > 0 && <><PlayButton label="Liked Songs" onClick={play} playing={playing} /><ShuffleToggle armed={shuffleArmed} onToggle={onToggleShuffle} /></>}
+      actions={songs.length > 0 && <><PlayButton label={label} onClick={play} playing={playing} /><ShuffleToggle armed={shuffleArmed} onToggle={onToggleShuffle} /></>}
       art={<span className="collection-header__art liked-cover"><Heart fill="currentColor" size={64} /></span>}
       color="rgb(80, 56, 160)"
       compact={compactHeader}
-      meta={<><strong>{username}</strong><span> • {songs.length} {songs.length === 1 ? "song" : "songs"}</span></>}
+      meta={<><strong>{artistName ?? username}</strong><span> • {songs.length} {songs.length === 1 ? "song" : "songs"}</span></>}
       onPlay={songs.length ? play : undefined}
       playing={playing}
       title="Liked Songs"
       type="Playlist"
     >
-      {songs.length ? <TrackTable currentId={songList.currentId} isLiked={songList.isLiked} isPlaying={songList.isPlaying} onMenu={songList.onMenu} onPlay={(index) => onPlay(songs, index)} onSelect={songList.onSelect} onToggleStar={songList.onToggleStar} selectedIds={songList.selectedIds} showDateAdded showQuality={songList.showQuality} songs={songs} /> : <EmptyState title="Songs you like will appear here" body="Save songs by tapping the plus icon." />}
+      {songs.length ? <TrackTable currentId={songList.currentId} isLiked={songList.isLiked} isPlaying={songList.isPlaying} onMenu={songList.onMenu} onPlay={(index) => onPlay(songs, index)} onSelect={songList.onSelect} onToggleStar={songList.onToggleStar} selectedIds={songList.selectedIds} showDateAdded showQuality={songList.showQuality} songs={songs} /> : (artistName ? <EmptyState title={`No liked songs by ${artistName}`} body="Songs you like by this artist will appear here." /> : <EmptyState title="Songs you like will appear here" body="Save songs by tapping the plus icon." />)}
     </CollectionPage>
   );
 }
 
-export function DetailView({ artistArt, cardMenu, collectionStarred, compactHeader, detail, downloads, isLoading, onDownloadCollection, onEnlarge, onMore, onOpenAlbum, onOpenArtist, onPlay, onPlayAlbum, onPlayArtist, onPlayCollection, onRadio, onRemoveCollection, onReorder, onToggleCollectionStar, onTogglePlayback, onToggleShuffle, ownsPlaylist, route, shuffleArmed, songList }: CollectionControls & {
+export function DetailView({ artistArt, artistLikedCount, onOpenLikedByArtist, cardMenu, collectionStarred, compactHeader, detail, downloads, isLoading, onDownloadCollection, onEnlarge, onMore, onOpenAlbum, onOpenArtist, onPlay, onPlayAlbum, onPlayArtist, onPlayCollection, onRadio, onRemoveCollection, onReorder, onToggleCollectionStar, onTogglePlayback, onToggleShuffle, ownsPlaylist, route, shuffleArmed, songList }: CollectionControls & {
   artistArt?: string;
+  artistLikedCount: number;
+  onOpenLikedByArtist: (artist: { id: string; name: string }) => void;
   cardMenu: CardMenu;
   collectionStarred: boolean;
   detail?: DetailState;
@@ -371,6 +399,16 @@ export function DetailView({ artistArt, cardMenu, collectionStarred, compactHead
         title={detail.name}
         type="Artist"
       >
+        {artistLikedCount > 0 && (
+          <button className="liked-by-artist" onClick={() => onOpenLikedByArtist({ id: detail.id, name: detail.name })} type="button">
+            <span className="liked-by-artist__art">
+              <MediaArtwork alt="" coverArt={detail.coverArt} fallback="artist" shape="circle" />
+              <span aria-hidden="true"><Heart fill="currentColor" size={10} /></span>
+            </span>
+            <span className="liked-by-artist__text"><strong>You liked</strong><small>{artistLikedCount} {artistLikedCount === 1 ? "song" : "songs"} by {detail.name}</small></span>
+            <ChevronRight aria-hidden="true" size={16} />
+          </button>
+        )}
         {topSongs.length > 0 && <section className="result-section"><h2>Popular</h2><TrackTable currentId={songList.currentId} isLiked={songList.isLiked} isPlaying={songList.isPlaying} onMenu={songList.onMenu} onOpenAlbum={onOpenAlbum} onOpenArtist={onOpenArtist} onPlay={(index) => onPlay(topSongs, index, detail.name)} onSelect={songList.onSelect} onToggleStar={songList.onToggleStar} selectedIds={songList.selectedIds} showAlbum={false} showArtwork songs={topSongs.slice(0, 10)} /></section>}
         {topSongs[0] && <div className="collection-inline-actions"><button className="pill-button" onClick={() => onRadio(topSongs[0])} type="button"><Radio size={15} /> Artist radio</button></div>}
         <section className="catalog-shelf"><h2>Discography</h2><div className="catalog-grid">{detail.albums.map((album) => <AlbumCard album={album} key={album.id} onMenu={(event) => cardMenu.album(album, event)} onOpen={() => onOpenAlbum(album.id)} onPlay={onPlayAlbum} />)}</div></section>
@@ -453,11 +491,11 @@ export function DownloadsView({ downloads, onClear, onPlay, songList }: { downlo
   return <><PageHeading title="Downloads" subtitle="Music stored on this computer for this server profile." /><div className="download-summary"><span><HardDrive size={19} /><strong>{songs.length} {songs.length === 1 ? "track" : "tracks"}</strong><small>{formatBytes(downloads.totalBytes)} used</small></span>{songs.length > 0 && <button onClick={onClear} type="button"><Trash2 size={16} /> Clear downloads</button>}</div>{songs.length > 0 ? <TrackTable currentId={songList.currentId} downloadProgress={downloads.progress} downloadedIds={downloads.downloadedIds} isLiked={songList.isLiked} isPlaying={songList.isPlaying} onMenu={songList.onMenu} onPlay={(index) => onPlay(songs, index)} onSelect={songList.onSelect} onToggleStar={songList.onToggleStar} selectedIds={songList.selectedIds} showDateAdded showQuality={songList.showQuality} songs={songs} /> : <EmptyState title="No downloads yet" body="Use a song or collection menu to make music available offline." />}{downloads.failures.length > 0 && <section className="download-failures"><h2>{downloads.failures.length} {downloads.failures.length === 1 ? "track" : "tracks"} did not finish</h2><p>The rest of the batch continued. Retry the ones that stalled.</p><ul>{downloads.failures.slice(0, 30).map((failure) => <li key={failure.song.id}><span><strong>{failure.song.title}</strong><small>{failure.message}</small></span><button onClick={() => void downloads.download(failure.song).catch(() => undefined)} type="button">Retry</button></li>)}</ul><button className="pill-button" onClick={() => void downloads.retryFailed()} type="button"><RotateCcw size={16} /> Retry all</button></section>}{Object.values(downloads.progress).some((item) => item.status === "downloading" || item.status === "paused") && <section className="download-transfers"><h2>Transfers</h2>{Object.values(downloads.progress).filter((item) => item.status !== "complete").map((item) => <div key={item.id}><Download size={17} /><span><strong>{item.status === "paused" ? "Paused" : item.status === "failed" ? "Needs attention" : "Downloading"}</strong><small>{item.message ?? (item.total ? `${formatBytes(item.received)} of ${formatBytes(item.total)}` : formatBytes(item.received))}</small></span>{item.status === "downloading" && <button onClick={() => void downloads.pause(item.id)} type="button">Pause</button>}</div>)}</section>}</>;
 }
 
-export function ProfileView({ connectionStatus, library, onDevices, onSettings, onSignOut, overview }: { connectionStatus: "online" | "offline"; library: ConnectedLibrary; onDevices: () => void; onSettings: () => void; onSignOut: () => void; overview: LibraryOverview }) {
-  return <><div className="profile-hero"><span>{library.server.username.slice(0, 1).toUpperCase()}</span><div><p className="collection-header__type">Profile</p><h1>{library.server.username}</h1><p><i className={connectionStatus === "online" ? "profile-status profile-status--online" : "profile-status"} />{connectionStatus === "online" ? "Connected" : "Offline"} • {library.server.displayHost}</p></div></div><div className="profile-stats"><span><strong>{overview.albums.length.toLocaleString()}</strong><small>Albums</small></span><span><strong>{overview.artists.length.toLocaleString()}</strong><small>Artists</small></span><span><strong>{overview.playlists.length.toLocaleString()}</strong><small>Playlists</small></span><span><strong>{overview.starredSongs.length.toLocaleString()}</strong><small>Liked songs</small></span></div><div className="profile-actions"><button className="modal-primary" onClick={onSettings} type="button">Settings</button><button onClick={onDevices} type="button">Splynt Connect</button><button onClick={onSignOut} type="button">Switch account</button></div></>;
+export function ProfileView({ connectionStatus, library, onDevices, onHistory, onSettings, onSignOut, onStats, overview }: { connectionStatus: "online" | "offline"; library: ConnectedLibrary; onDevices: () => void; onHistory: () => void; onSettings: () => void; onSignOut: () => void; onStats: () => void; overview: LibraryOverview }) {
+  return <><div className="profile-hero"><span>{library.server.username.slice(0, 1).toUpperCase()}</span><div><p className="collection-header__type">Profile</p><h1>{library.server.username}</h1><p><i className={connectionStatus === "online" ? "profile-status profile-status--online" : "profile-status"} />{connectionStatus === "online" ? "Connected" : "Offline"} • {library.server.displayHost}</p></div></div><div className="profile-stats"><span><strong>{overview.albums.length.toLocaleString()}</strong><small>Albums</small></span><span><strong>{overview.artists.length.toLocaleString()}</strong><small>Artists</small></span><span><strong>{overview.playlists.length.toLocaleString()}</strong><small>Playlists</small></span><span><strong>{overview.starredSongs.length.toLocaleString()}</strong><small>Liked songs</small></span></div><div className="profile-actions"><button className="modal-primary" onClick={onStats} type="button">Stats</button><button onClick={onHistory} type="button">Listening History</button><button onClick={onSettings} type="button">Settings</button><button onClick={onDevices} type="button">Splynt Connect</button><button onClick={onSignOut} type="button">Switch account</button></div></>;
 }
 
-export function SettingsView({ contextWidth, downloads, library, onClearDownloads, onOpenPanel, onReload, onResetLayout, onSleep, settings, sidebarWidth, sleepRemaining, updateSetting, resetSettings }: { contextWidth: number; downloads: DownloadsController; library: ConnectedLibrary; onClearDownloads: () => void; onOpenPanel: (mode: ContextPanelMode) => void; onReload: () => void; onResetLayout: () => void; onSleep: (minutes: number | undefined) => void; settings: DesktopSettings; sidebarWidth: number; sleepRemaining?: number; updateSetting: <K extends keyof DesktopSettings>(key: K, value: DesktopSettings[K]) => void; resetSettings: () => void }) {
+export function SettingsView({ contextWidth, downloads, library, lyricsIndex, onClearDownloads, onIndexLyrics, onOpenPanel, onReload, onResetLayout, onSleep, settings, sidebarWidth, sleepRemaining, updateSetting, resetSettings }: { contextWidth: number; downloads: DownloadsController; library: ConnectedLibrary; lyricsIndex?: LyricsIndexStatus; onIndexLyrics: () => void; onClearDownloads: () => void; onOpenPanel: (mode: ContextPanelMode) => void; onReload: () => void; onResetLayout: () => void; onSleep: (minutes: number | undefined) => void; settings: DesktopSettings; sidebarWidth: number; sleepRemaining?: number; updateSetting: <K extends keyof DesktopSettings>(key: K, value: DesktopSettings[K]) => void; resetSettings: () => void }) {
   const [cache, setCache] = useState({ files: 0, bytes: 0 });
   const [diagnosticsPath, setDiagnosticsPath] = useState<string>();
   useEffect(() => { void invoke<string | null>("diagnostics_path").then((path) => setDiagnosticsPath(path ?? undefined)).catch(() => undefined); }, []);
@@ -474,6 +512,7 @@ export function SettingsView({ contextWidth, downloads, library, onClearDownload
       <label className="setting-row setting-row--slider"><span><strong>Crossfade</strong><small>{settings.crossfadeSeconds ? `${settings.crossfadeSeconds}s on natural transitions only` : "Off"}</small></span><SmoothRange aria-label="Crossfade seconds" max={12} min={0} onChange={(value) => updateSetting("crossfadeSeconds", value)} step={1} value={settings.crossfadeSeconds} /></label>
       <SettingToggle checked={settings.lyricsAutoScroll} label="Lyrics follow playback" hint="Keeps the active line centred while a synced lyric plays." onChange={(value) => updateSetting("lyricsAutoScroll", value)} />
       <div className="setting-row setting-row--pickers"><span><strong>Lyrics source</strong><small>Auto checks your server first, then uses LRCLIB when the server has no lyrics.</small></span><span className="setting-row__controls"><select aria-label="Lyrics source" onChange={(event) => updateSetting("lyricsSource", event.target.value as DesktopSettings["lyricsSource"])} value={settings.lyricsSource}>{lyricsSources.map((source) => <option key={source} value={source}>{source === "auto" ? "Auto" : source === "server" ? "Music server" : "LRCLIB (public)"}</option>)}</select></span></div>
+      <div className="setting-row"><span><strong>Lyrics search</strong><small>{lyricsIndex ? `${lyricsIndex.searchable.toLocaleString()} songs searchable by their lyrics${lyricsIndex.running && lyricsIndex.total ? `. Checked ${Math.min(lyricsIndex.scanned, lyricsIndex.total).toLocaleString()} of ${lyricsIndex.total.toLocaleString()} songs on your server.` : lyricsIndex.running ? ". Listing your server's songs." : "."}` : "Search finds songs by a line of their lyrics."}</small></span><span className="setting-row__controls"><button className="pill-button" disabled={lyricsIndex?.running} onClick={onIndexLyrics} type="button">{lyricsIndex?.running ? "Indexing…" : "Rebuild index"}</button></span></div>
       <div className="setting-row setting-row--pickers"><span><strong>Lyrics text size</strong><small>Applies to the lyrics view.</small></span><span className="setting-row__controls"><select aria-label="Lyrics text size" onChange={(event) => updateSetting("lyricsTextSize", event.target.value as DesktopSettings["lyricsTextSize"])} value={settings.lyricsTextSize}>{lyricsTextSizes.map((size) => <option key={size} value={size}>{size[0].toUpperCase() + size.slice(1)}</option>)}</select></span></div>
       <SettingToggle checked={settings.hideExternalPlaylists} label="Hide external playlists" hint="Leaves out playlists that come from a connected provider rather than your server." onChange={(value) => updateSetting("hideExternalPlaylists", value)} />
       <SettingToggle checked={settings.hideExplicitContent} label="Hide explicit content" hint="Filters explicit tracks out of browsing. Downloads are never hidden." onChange={(value) => updateSetting("hideExplicitContent", value)} />

@@ -1,9 +1,9 @@
 import {
   ChevronRight, Disc3, Download, GripVertical, Heart, Laptop, ListEnd, ListMusic, Maximize, MicVocal,
   Minimize, Minimize2, MonitorSpeaker, MoreHorizontal, Pause, Play, Plus, Radio, Search, SkipBack, SkipForward,
-  Smartphone, Trash2, Tv, UserRound, X,
+  Smartphone, Trash2, Tv, UserRound, WifiOff, X,
 } from "lucide-react";
-import type { DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { CSSProperties } from "react";
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu";
@@ -12,7 +12,7 @@ import { useMenuFocus } from "../hooks/useMenuFocus";
 import type { PlaybackController } from "../hooks/usePlayback";
 import { externalProviderLabel } from "../lib/externalSource";
 import type {
-  ArtistSummary, ConnectCommand, ConnectPeer, ConnectSnapshot, ContextPanelMode, LyricsResult, PlaylistSummary, SongSummary,
+  ArtistSummary, AutoplayStatus, ConnectCommand, ConnectPeer, ConnectSnapshot, ContextPanelMode, LyricsResult, PlaylistSummary, SongSummary,
 } from "../types";
 import { LikeGlyph } from "./Catalog";
 import { MediaArtwork } from "./MediaArtwork";
@@ -46,6 +46,7 @@ type ContextPanelProps = {
   onStartGroup: () => void;
   onStopGroup: () => void;
   onSaveQueue: () => void;
+  autoplay?: AutoplayStatus;
   width: number;
 };
 
@@ -73,7 +74,7 @@ export function DesktopContextPanel(props: ContextPanelProps) {
           playback={props.playback}
         />
       )}
-      {props.mode === "queue" && <QueuePanel onSaveQueue={props.onSaveQueue} playback={props.playback} recentlyPlayed={props.recentlyPlayed} />}
+      {props.mode === "queue" && <QueuePanel autoplay={props.autoplay} onSaveQueue={props.onSaveQueue} playback={props.playback} recentlyPlayed={props.recentlyPlayed} />}
       {props.mode === "connect" && (
         <ConnectPanel
           canHandoff={Boolean(props.playback.current)}
@@ -139,7 +140,7 @@ function NowPlayingPanel({ artist, artistFollowed, liked, onOpenAlbum, onOpenArt
       {next && (
         <article className="now-panel__card">
           <div className="now-panel__card-heading"><p className="now-panel__card-label">Next in queue</p><button onClick={onOpenQueue} type="button">Open queue</button></div>
-          <button className="now-panel__next" onClick={() => playback.playQueue(playback.queue, playback.index + 1, true, 0, playback.contextLabel)} type="button">
+          <button className="now-panel__next" onClick={() => playback.jumpTo(playback.index + 1)} type="button">
             <MediaArtwork alt="" className="queue-row__art" coverArt={next.coverArt} />
             <span><strong>{next.title}</strong><small>{next.artist}</small></span>
           </button>
@@ -149,7 +150,7 @@ function NowPlayingPanel({ artist, artistFollowed, liked, onOpenAlbum, onOpenArt
   );
 }
 
-function QueuePanel({ onSaveQueue, playback, recentlyPlayed }: { onSaveQueue: () => void; playback: PlaybackController; recentlyPlayed: SongSummary[] }) {
+function QueuePanel({ autoplay, onSaveQueue, playback, recentlyPlayed }: { autoplay?: AutoplayStatus; onSaveQueue: () => void; playback: PlaybackController; recentlyPlayed: SongSummary[] }) {
   const [tab, setTab] = useState<"queue" | "recent">("queue");
   return (
     <>
@@ -157,7 +158,7 @@ function QueuePanel({ onSaveQueue, playback, recentlyPlayed }: { onSaveQueue: ()
         <button aria-selected={tab === "queue"} className={tab === "queue" ? "panel-tab panel-tab--active" : "panel-tab"} onClick={() => setTab("queue")} role="tab" type="button">Queue</button>
         <button aria-selected={tab === "recent"} className={tab === "recent" ? "panel-tab panel-tab--active" : "panel-tab"} onClick={() => setTab("recent")} role="tab" type="button">Recently played</button>
       </div>
-      {tab === "queue" ? <QueueList onSaveQueue={onSaveQueue} playback={playback} /> : <RecentlyPlayedList playback={playback} songs={recentlyPlayed} />}
+      {tab === "queue" ? <QueueList autoplay={autoplay} onSaveQueue={onSaveQueue} playback={playback} /> : <RecentlyPlayedList playback={playback} songs={recentlyPlayed} />}
     </>
   );
 }
@@ -178,44 +179,207 @@ function RecentlyPlayedList({ playback, songs }: { playback: PlaybackController;
   );
 }
 
-function QueueList({ onSaveQueue, playback }: { onSaveQueue: () => void; playback: PlaybackController }) {
-  const [dragging, setDragging] = useState<number>();
-  const [dragTarget, setDragTarget] = useState<number>();
+type QueueDrag = {
+  from: number;
+  to: number;
+  pointerId: number;
+  element: HTMLElement;
+  startY: number;
+  pointerY: number;
+  startScroll: number;
+  rows: { index: number; mid: number; element: HTMLElement; shift: string }[];
+  scroller: HTMLElement | null;
+  active: boolean;
+  frame: number;
+};
+
+function scrollParent(element: HTMLElement | null) {
+  for (let node = element?.parentElement; node; node = node.parentElement) {
+    const { overflowY } = getComputedStyle(node);
+    if ((overflowY === "auto" || overflowY === "scroll") && node.scrollHeight > node.clientHeight) return node;
+  }
+  return null;
+}
+
+/// Rows are keyed by song and occurrence rather than by position, so a
+/// reorder moves the existing row elements instead of remounting them.
+function queueKeys(songs: SongSummary[]) {
+  const seen = new Map<string, number>();
+  return songs.map((song) => {
+    const count = seen.get(song.id) ?? 0;
+    seen.set(song.id, count + 1);
+    return `${song.id}#${count}`;
+  });
+}
+
+function QueueList({ autoplay, onSaveQueue, playback }: { autoplay?: AutoplayStatus; onSaveQueue: () => void; playback: PlaybackController }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<QueueDrag | undefined>(undefined);
+  const settling = useRef(false);
+  const suppressClick = useRef(false);
+
+  const clearOffsets = () => {
+    const list = listRef.current;
+    if (!list) return;
+    list.classList.remove("queue-list--dragging");
+    for (const row of list.querySelectorAll<HTMLElement>("[data-queue-row]")) {
+      row.classList.remove("queue-row--lifted");
+      row.style.transition = "none";
+      row.style.transform = "";
+    }
+    void list.offsetHeight;
+    for (const row of list.querySelectorAll<HTMLElement>("[data-queue-row]")) row.style.transition = "";
+  };
+
+  // A drop leaves every row where the drag put it until React has rendered
+  // the new order, then clears the offsets before paint. Clearing them any
+  // earlier shows the old order for a frame.
+  useLayoutEffect(() => {
+    if (!settling.current) return;
+    settling.current = false;
+    clearOffsets();
+  }, [playback.queue]);
+
+  useEffect(() => () => {
+    if (drag.current) window.cancelAnimationFrame(drag.current.frame);
+  }, []);
+
   if (!playback.queue.length) return <PanelEmpty icon={ListMusic} text="Your queue is empty." />;
   const manualStart = playback.index + 1;
   const contextStart = manualStart + playback.manualQueueCount;
-  const canReorder = (index: number) => index >= manualStart && index < contextStart;
-  const beginDrag = (event: ReactDragEvent, index: number) => {
-    if (!canReorder(index)) { event.preventDefault(); return; }
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", String(index));
-    setDragging(index);
+  // Up Next is one list, as on iOS: any upcoming row can go anywhere in it,
+  // and where it lands decides whether it counts as added by hand.
+  const canReorder = (index: number) => index >= manualStart && index < playback.queue.length;
+  const keys = queueKeys(playback.queue);
+
+  const layout = () => {
+    const state = drag.current;
+    if (!state?.active) return;
+    const self = state.rows.find((row) => row.index === state.from);
+    if (!self) return;
+    const offset = state.pointerY - state.startY + (state.scroller?.scrollTop ?? 0) - state.startScroll;
+    const first = state.rows[0].mid;
+    const last = state.rows[state.rows.length - 1].mid;
+    const centre = Math.min(Math.max(self.mid + offset, first), last);
+    let to = state.from;
+    for (const row of state.rows) {
+      if (row.index > state.from && centre > row.mid) to = Math.max(to, row.index);
+      if (row.index < state.from && centre < row.mid) to = Math.min(to, row.index);
+    }
+    state.to = to;
+    // A displaced row takes its neighbour's place, which also carries it
+    // across a section label without overlapping it.
+    state.rows.forEach((row, position) => {
+      const shift = row.index === state.from ? `translateY(${centre - self.mid}px)`
+        : row.index > state.from && row.index <= to ? `translateY(${state.rows[position - 1].mid - row.mid}px)`
+        : row.index < state.from && row.index >= to ? `translateY(${state.rows[position + 1].mid - row.mid}px)`
+        : "";
+      if (shift === row.shift) return;
+      row.shift = shift;
+      row.element.style.transform = shift;
+    });
   };
-  const drop = (event: ReactDragEvent, index: number) => {
-    event.preventDefault();
-    const from = dragging ?? Number(event.dataTransfer.getData("text/plain"));
-    if (Number.isInteger(from) && canReorder(from) && canReorder(index)) playback.moveQueueItem(from, index);
-    setDragging(undefined);
-    setDragTarget(undefined);
+
+  // Holding a row near the top or bottom edge scrolls the panel, faster the
+  // closer the pointer gets.
+  const autoScroll = () => {
+    const state = drag.current;
+    if (!state?.active) return;
+    if (state.scroller) {
+      const bounds = state.scroller.getBoundingClientRect();
+      const edge = 48;
+      const speed = state.pointerY < bounds.top + edge ? -(bounds.top + edge - state.pointerY) / 4
+        : state.pointerY > bounds.bottom - edge ? (state.pointerY - bounds.bottom + edge) / 4 : 0;
+      if (speed) {
+        state.scroller.scrollTop += speed;
+        layout();
+      }
+    }
+    state.frame = window.requestAnimationFrame(autoScroll);
   };
+
+  const beginDrag = (event: ReactPointerEvent<HTMLDivElement>, index: number) => {
+    suppressClick.current = false;
+    if (event.button !== 0 || !canReorder(index) || drag.current) return;
+    if ((event.target as Element).closest("button:not(.queue-row__grip):not(.queue-row__main)")) return;
+    const list = listRef.current;
+    if (!list) return;
+    const scroller = scrollParent(list);
+    const scroll = scroller?.scrollTop ?? 0;
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-queue-row]")]
+      .map((element) => ({ element, index: Number(element.dataset.queueRow) }))
+      .filter((row) => canReorder(row.index))
+      .map((row) => {
+        const rect = row.element.getBoundingClientRect();
+        return { ...row, mid: rect.top + rect.height / 2 + scroll, shift: "" };
+      });
+    const self = rows.find((row) => row.index === index);
+    if (!self || rows.length < 2) return;
+    drag.current = {
+      from: index,
+      to: index,
+      pointerId: event.pointerId,
+      element: event.currentTarget,
+      startY: event.clientY,
+      pointerY: event.clientY,
+      startScroll: scroll,
+      rows,
+      scroller,
+      active: false,
+      frame: 0,
+    };
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const state = drag.current;
+    if (!state || event.pointerId !== state.pointerId) return;
+    state.pointerY = event.clientY;
+    if (!state.active) {
+      if (Math.abs(event.clientY - state.startY) < 5) return;
+      state.active = true;
+      suppressClick.current = true;
+      state.element.setPointerCapture(event.pointerId);
+      state.element.classList.add("queue-row--lifted");
+      listRef.current?.classList.add("queue-list--dragging");
+      autoScroll();
+    }
+    layout();
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>, commit: boolean) => {
+    const state = drag.current;
+    if (!state || event.pointerId !== state.pointerId) return;
+    drag.current = undefined;
+    window.cancelAnimationFrame(state.frame);
+    if (!state.active) return;
+    // The click that follows a drop is not a request to play the row.
+    window.setTimeout(() => { suppressClick.current = false; }, 0);
+    if (commit && state.to !== state.from) {
+      settling.current = true;
+      playback.moveQueueItem(state.from, state.to);
+    } else {
+      clearOffsets();
+    }
+  };
+
   return (
-    <div className="queue-list">
+    <div className="queue-list" ref={listRef}>
       {playback.undoQueueLabel && <div className="queue-undo" role="status"><span>{playback.undoQueueLabel}</span><button onClick={playback.undoQueueMutation} type="button">Undo</button></div>}
-      {playback.queue.map((song, index) => (
-        <Fragment key={`${song.id}-${index}`}>
+      {playback.queue.map((song, index) => index < playback.index ? null : (
+        <Fragment key={keys[index]}>
           {index === playback.index && <p className="queue-section-label">Now playing</p>}
           {index === manualStart && playback.manualQueueCount > 0 && <div className="queue-section-label"><span>Next in queue</span><button onClick={playback.clearManualQueue} type="button">Clear queue</button></div>}
           {index === contextStart && index > playback.index && <div className="queue-section-label"><span>Next from: {playback.contextLabel}</span><button onClick={playback.clearUpcoming} type="button">Clear</button></div>}
         <div
-          className={`${index === playback.index ? "queue-row queue-row--active" : "queue-row"}${dragging === index ? " queue-row--dragging" : ""}${dragTarget === index ? " queue-row--drop-target" : ""}`}
-          draggable={canReorder(index)}
-          onDragEnd={() => { setDragging(undefined); setDragTarget(undefined); }}
-          onDragEnter={() => { if (canReorder(index)) setDragTarget(index); }}
-          onDragOver={(event) => { if (canReorder(index)) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
-          onDragStart={(event) => beginDrag(event, index)}
-          onDrop={(event) => drop(event, index)}
+          className={index === playback.index ? "queue-row queue-row--active" : "queue-row"}
+          data-queue-row={index}
+          onLostPointerCapture={(event) => endDrag(event, false)}
+          onPointerCancel={(event) => endDrag(event, false)}
+          onPointerDown={(event) => beginDrag(event, index)}
+          onPointerMove={moveDrag}
+          onPointerUp={(event) => endDrag(event, true)}
         >
-          <button className="queue-row__main" onClick={() => playback.playQueue(playback.queue, index, true, 0, playback.contextLabel)} type="button">
+          <button className="queue-row__main" onClick={() => { if (!suppressClick.current) playback.jumpTo(index); }} type="button">
             <MediaArtwork alt="" className="queue-row__art" coverArt={song.coverArt} />
             <span><strong>{song.title}</strong><small>{song.artist}</small></span>
             {index === playback.index && playback.isPlaying && <span className="playing-bars" aria-label="Playing"><i /><i /><i /></span>}
@@ -236,6 +400,7 @@ function QueueList({ onSaveQueue, playback }: { onSaveQueue: () => void; playbac
         </div>
         </Fragment>
       ))}
+      {playback.index === playback.queue.length - 1 && <AutoplayNote status={autoplay} />}
       <div className="queue-list__footer"><button className="pill-button" onClick={onSaveQueue} type="button">Save queue as playlist</button></div>
     </div>
   );
@@ -336,6 +501,19 @@ function ConnectPanel({ canHandoff, groupId, onMoveHere, onMoveToDevice, onSend,
           </div>
         </section>
       )) : <PanelEmpty icon={MonitorSpeaker} text="No other Splynt players found on this network." />}
+    </div>
+  );
+}
+
+/// The line under the last queued song, worded as iOS words it.
+function AutoplayNote({ status }: { status?: AutoplayStatus }) {
+  if (!status) return <p className="queue-autoplay queue-autoplay--quiet">Nothing else is queued.</p>;
+  const title = status.state === "preparing" ? "Preparing Autoplay" : status.state === "ready" ? "Autoplay is ready" : "Autoplay isn't ready";
+  const detail = status.state === "unavailable" ? "Playback will stop unless another song is added" : `Will continue with ${status.label}`;
+  return (
+    <div className={`queue-autoplay queue-autoplay--${status.state}`} role="status">
+      {status.state === "unavailable" ? <WifiOff aria-hidden="true" size={17} /> : <Radio aria-hidden="true" size={17} />}
+      <span><strong>{title}</strong><small>{detail}</small></span>
     </div>
   );
 }

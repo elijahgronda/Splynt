@@ -13,6 +13,9 @@ type PersistedPlayback = {
   repeat: RepeatMode;
   contextLabel?: string;
   manualQueueCount?: number;
+  /// The playing list in its own order. `queue` is the play order, which
+  /// shuffle and drags rearrange; turning shuffle off restores from this.
+  context?: SongSummary[];
 };
 
 export type PlaybackOptions = {
@@ -32,17 +35,28 @@ function readPersisted(storageKey: string): PersistedPlayback {
     // Migrate the single-profile v2 key once; all subsequent recovery is
     // isolated to the signed-in server/account.
     const parsed = JSON.parse(localStorage.getItem(storageKey) ?? localStorage.getItem(STORAGE_KEY) ?? "{}") as Partial<PersistedPlayback>;
-    const queue = Array.isArray(parsed.queue) ? parsed.queue.slice(0, 1000) : [];
+    let queue = Array.isArray(parsed.queue) ? parsed.queue.slice(0, 1000) : [];
     const index = queue.length ? Math.min(Math.max(0, Number(parsed.index) || 0), queue.length - 1) : -1;
+    const shuffle = Boolean(parsed.shuffle);
+    const manualQueueCount = Math.max(0, Math.min(queue.length, Number(parsed.manualQueueCount) || 0));
+    const context = Array.isArray(parsed.context) ? parsed.context.slice(0, 1000) : queue;
+    // A session saved before shuffle reordered the queue kept the list's own
+    // order and shuffled only the choice of next index. Shuffle what is still
+    // upcoming once, so the restored queue is the order that will play.
+    if (shuffle && !Array.isArray(parsed.context) && index >= 0) {
+      const contextStart = index + 1 + manualQueueCount;
+      queue = [...queue.slice(0, contextStart), ...shuffledSongs(queue.slice(contextStart))];
+    }
     return {
       queue,
       index,
       position: Math.max(0, Number(parsed.position) || 0),
       volume: Math.max(0, Math.min(1, Number(parsed.volume ?? 0.8))),
-      shuffle: Boolean(parsed.shuffle),
+      shuffle,
       repeat: parsed.repeat === "all" || parsed.repeat === "one" ? parsed.repeat : "off",
       contextLabel: parsed.contextLabel,
-      manualQueueCount: Math.max(0, Math.min(queue.length, Number(parsed.manualQueueCount) || 0)),
+      manualQueueCount,
+      context,
     };
   } catch {
     return { queue: [], index: -1, position: 0, volume: 0.8, shuffle: false, repeat: "off" };
@@ -65,6 +79,24 @@ function shuffledIndexes(length: number, current: number, staleAt?: (index: numb
     ? [...shuffle(tail.filter((index) => !staleAt(index))), ...shuffle(tail.filter(staleAt))]
     : shuffle(tail);
   return current >= 0 ? [current, ...ordered] : ordered;
+}
+
+function shuffledSongs(songs: SongSummary[], staleAt?: (song: SongSummary) => boolean) {
+  return shuffledIndexes(songs.length, -1, staleAt && ((index) => staleAt(songs[index]))).map((index) => songs[index]);
+}
+
+/// Where the play order sits in the list's own order: the current song, or
+/// failing that the last song before it that came from the list, so a
+/// hand-queued song playing does not lose the place.
+function contextAnchor(queue: SongSummary[], index: number, context: SongSummary[]) {
+  const positions = new Map<string, number>();
+  context.forEach((song, position) => { if (!positions.has(song.id)) positions.set(song.id, position); });
+  for (let cursor = index; cursor >= 0; cursor -= 1) {
+    const song = queue[cursor];
+    const position = song && positions.get(song.id);
+    if (position !== undefined) return position;
+  }
+  return -1;
 }
 
 function createElement() {
@@ -98,7 +130,8 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   // The equalizer owns both elements, not just the active one: a crossfade has
   // two of them audible at once, and only hearing the filters on one would be
   // worse than not having them at all. The graph itself stays dormant until the
-  // curve is doing something. See lib/equalizerGraph.ts.
+  // curve is doing something, and once it is flat again freshElement below
+  // takes each element back off it. See lib/equalizerGraph.ts.
   const equalizerRef = useRef<EqualizerGraph | undefined>(undefined);
   if (!equalizerRef.current) equalizerRef.current = new EqualizerGraph();
   useEffect(() => {
@@ -121,12 +154,16 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   const [repeat, setRepeat] = useState<RepeatMode>(initial.repeat);
   const [contextLabel, setContextLabel] = useState(initial.contextLabel ?? "Queue");
   const [manualQueueCount, setManualQueueCount] = useState(initial.manualQueueCount ?? 0);
-  const [undoQueue, setUndoQueue] = useState<{ label: string; queue: SongSummary[]; index: number; manualQueueCount: number }>();
+  const [undoQueue, setUndoQueue] = useState<{ label: string; queue: SongSummary[]; index: number; manualQueueCount: number; context: SongSummary[] }>();
   const [error, setError] = useState<string>();
+  // Set once the automatic retry has also failed. Playback stops on the
+  // failed song and waits for Retry, Continue or Start Radio, as on iOS.
+  const [failed, setFailed] = useState(false);
   const shouldAutoplay = useRef(false);
   const pendingPosition = useRef(initial.position);
-  const shuffleOrder = useRef<number[]>(shuffledIndexes(initial.queue.length, initial.index));
-  const shuffleCursor = useRef(0);
+  const contextRef = useRef<SongSummary[]>(initial.context ?? initial.queue);
+  const shuffleRef = useRef(shuffle);
+  shuffleRef.current = shuffle;
   const completedTrack = useRef<string | undefined>(undefined);
   const publishedSecond = useRef(-1);
   const failures = useRef(new Map<string, number>());
@@ -167,40 +204,20 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     if (!song) return;
     recentlyPlayed.current = [song.id, ...recentlyPlayed.current.filter((id) => id !== song.id)].slice(0, 200);
   }, []);
-  const reshuffle = useCallback((songs: SongSummary[], anchor: number) => {
-    if (optionsRef.current.shuffleMode === "random") return shuffledIndexes(songs.length, anchor);
+  const shuffleSongs = useCallback((songs: SongSummary[]) => {
+    if (optionsRef.current.shuffleMode === "random") return shuffledSongs(songs);
     const stale = new Set(recentlyPlayed.current);
-    return shuffledIndexes(songs.length, anchor, (index) => stale.has(songs[index]?.id));
+    return shuffledSongs(songs, (song) => stale.has(song.id));
   }, []);
-  const reshuffleRef = useRef(reshuffle);
-  reshuffleRef.current = reshuffle;
 
+  // Shuffle reorders `queue` itself, so the queue is always the play order and
+  // the next track is simply the next row.
   const nextIndex = useCallback((direction: 1 | -1) => {
     if (!queue.length) return -1;
-    if (shuffle && queue.length > 1) {
-      const stale = shuffleOrder.current.length !== queue.length || !shuffleOrder.current.includes(index);
-      if (stale) {
-        shuffleOrder.current = reshuffleRef.current(queueRef.current, index);
-        shuffleCursor.current = 0;
-      } else {
-        shuffleCursor.current = Math.max(0, shuffleOrder.current.indexOf(index));
-      }
-      const nextCursor = shuffleCursor.current + direction;
-      if (nextCursor >= 0 && nextCursor < shuffleOrder.current.length) {
-        shuffleCursor.current = nextCursor;
-        return shuffleOrder.current[nextCursor];
-      }
-      if (repeat === "all") {
-        shuffleOrder.current = reshuffleRef.current(queueRef.current, index);
-        shuffleCursor.current = direction === 1 ? Math.min(1, queue.length - 1) : queue.length - 1;
-        return shuffleOrder.current[shuffleCursor.current] ?? index;
-      }
-      return -1;
-    }
     const candidate = index + direction;
     if (candidate >= 0 && candidate < queue.length) return candidate;
     return repeat === "all" ? (candidate < 0 ? queue.length - 1 : 0) : -1;
-  }, [index, queue, repeat, shuffle]);
+  }, [index, queue, repeat]);
 
   const nextIndexRef = useRef(nextIndex);
   nextIndexRef.current = nextIndex;
@@ -295,28 +312,39 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   const currentRef = useRef(current);
   currentRef.current = current;
   const persistedRef = useRef<PersistedPlayback>(initial);
-  persistedRef.current = { queue, index, position, volume, shuffle, repeat, contextLabel, manualQueueCount };
+  persistedRef.current = { queue, index, position, volume, shuffle, repeat, contextLabel, manualQueueCount, context: contextRef.current };
 
+  /// One automatic retry from where the song stopped, then a halt with the
+  /// recovery actions on screen. Skipping on by itself hid the failure and
+  /// could run through a whole queue of songs the server would not play.
   const recoverPlayback = useCallback((message: string) => {
     const track = currentRef.current;
     if (!track || recoveryTimer.current !== undefined) return;
+    const element = audio();
+    const at = element?.currentTime ?? persistedRef.current.position;
+    const total = track.duration || (element && Number.isFinite(element.duration) ? element.duration : 0);
+    // This close to the end, retrying replays the tail and ends again at
+    // once. Moving on sounds the same as the song finishing.
+    if (total > 0 && total - at <= 1.5) {
+      advanceRef.current(1);
+      return;
+    }
     const count = (failures.current.get(track.id) ?? 0) + 1;
     failures.current.set(track.id, count);
-    pendingPosition.current = audio()?.currentTime ?? persistedRef.current.position;
-    if (count <= 2) {
+    pendingPosition.current = at;
+    if (count <= 1) {
       setError(`${message} Retrying…`);
       recoveryTimer.current = window.setTimeout(() => {
         recoveryTimer.current = undefined;
         shouldAutoplay.current = true;
         setLoadToken((value) => value + 1);
-      }, count * 800);
-    } else {
-      setError(`${message} Continuing with the queue.`);
-      recoveryTimer.current = window.setTimeout(() => {
-        recoveryTimer.current = undefined;
-        advanceRef.current(1);
-      }, 900);
+      }, 800);
+      return;
     }
+    element?.pause();
+    setIsPlaying(false);
+    setError(message);
+    setFailed(true);
   }, [audio]);
 
   const beginCrossfade = useCallback((seconds: number, targetIndex: number) => {
@@ -339,108 +367,145 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   }, [adoptPartner, audio, cancelFade, partner]);
 
   // Listeners live on both elements; everything but the active one is ignored,
-  // so a crossfade partner cannot drive shell state while it ramps up.
-  useEffect(() => {
-    const elements = elementsRef.current.filter((element): element is HTMLAudioElement => Boolean(element));
-    if (!elements.length) return;
-    for (const element of elements) element.volume = volumeRef.current;
-
-    const isActive = (element: HTMLAudioElement) => element === elementsRef.current[activeSlot.current];
-    const disposers = elements.map((element) => {
-      const onTime = () => {
-        if (!isActive(element)) return;
-        const seconds = Math.floor(element.currentTime || 0);
-        if (seconds !== publishedSecond.current) {
-          publishedSecond.current = seconds;
-          setPosition(element.currentTime || 0);
-        }
-        const crossfade = optionsRef.current.crossfadeSeconds;
-        if (crossfade <= 0 || fadeTimer.current !== undefined || repeatRef.current === "one") return;
-        const total = Number.isFinite(element.duration) ? element.duration : 0;
-        if (!total) return;
-        const remaining = total - element.currentTime;
-        if (remaining > crossfade || remaining <= 0) return;
-        const target = nextIndexRef.current(1);
-        if (target < 0 || preloaded.current?.index !== target) return;
-        beginCrossfade(Math.min(crossfade, remaining), target);
-      };
-      const onDuration = () => {
-        if (!isActive(element)) return;
-        setDuration(Number.isFinite(element.duration) ? element.duration : currentRef.current?.duration ?? 0);
-      };
-      const onPlay = () => {
-        if (!isActive(element)) return;
-        setIsPlaying(true);
-        if (currentRef.current) failures.current.delete(currentRef.current.id);
-      };
-      const onPause = () => {
-        // A crossfade or a gapless join stops the outgoing element on purpose;
-        // that is not the user pausing playback.
-        if (!isActive(element) || fadeTimer.current !== undefined || adopting.current) return;
-        setIsPlaying(false);
-      };
-      const onError = () => {
-        if (!isActive(element)) return;
-        recoverPlayback("This track could not be played.");
-      };
-      const onEnded = () => {
-        if (!isActive(element)) return;
-        if (repeatRef.current === "one") {
-          submitScrobble(currentRef.current);
-          completedTrack.current = undefined;
-          element.currentTime = 0;
-          void element.play();
+  // so a crossfade partner cannot drive shell state while it ramps up. Binding
+  // is a function rather than effect body so freshElement can move them onto
+  // a replacement element synchronously, with no window for a missed event.
+  const unbinders = useRef(new Map<HTMLAudioElement, () => void>());
+  const bindElement = useCallback((element: HTMLAudioElement) => {
+    const isActive = (target: HTMLAudioElement) => target === elementsRef.current[activeSlot.current];
+    const onTime = () => {
+      if (!isActive(element)) return;
+      const seconds = Math.floor(element.currentTime || 0);
+      if (seconds !== publishedSecond.current) {
+        publishedSecond.current = seconds;
+        setPosition(element.currentTime || 0);
+      }
+      const crossfade = optionsRef.current.crossfadeSeconds;
+      if (crossfade <= 0 || fadeTimer.current !== undefined || repeatRef.current === "one") return;
+      const total = Number.isFinite(element.duration) ? element.duration : 0;
+      if (!total) return;
+      const remaining = total - element.currentTime;
+      if (remaining > crossfade || remaining <= 0) return;
+      const target = nextIndexRef.current(1);
+      if (target < 0 || preloaded.current?.index !== target) return;
+      beginCrossfade(Math.min(crossfade, remaining), target);
+    };
+    const onDuration = () => {
+      if (!isActive(element)) return;
+      setDuration(Number.isFinite(element.duration) ? element.duration : currentRef.current?.duration ?? 0);
+    };
+    const onPlay = () => {
+      if (!isActive(element)) return;
+      setIsPlaying(true);
+      if (currentRef.current) failures.current.delete(currentRef.current.id);
+    };
+    const onPause = () => {
+      // A crossfade or a gapless join stops the outgoing element on purpose;
+      // that is not the user pausing playback.
+      if (!isActive(element) || fadeTimer.current !== undefined || adopting.current) return;
+      setIsPlaying(false);
+    };
+    const onError = () => {
+      if (!isActive(element)) return;
+      recoverPlayback("This track could not be played.");
+    };
+    const onEnded = () => {
+      if (!isActive(element)) return;
+      if (repeatRef.current === "one") {
+        submitScrobble(currentRef.current);
+        completedTrack.current = undefined;
+        element.currentTime = 0;
+        void element.play();
+        return;
+      }
+      const target = nextIndexRef.current(1);
+      if (optionsRef.current.gapless && target >= 0 && preloaded.current?.index === target) {
+        const incoming = partner();
+        if (incoming) {
+          incoming.volume = volumeRef.current;
+          incoming.currentTime = 0;
+          void incoming.play().catch(() => undefined);
+          adoptPartner(target);
           return;
         }
-        const target = nextIndexRef.current(1);
-        if (optionsRef.current.gapless && target >= 0 && preloaded.current?.index === target) {
-          const incoming = partner();
-          if (incoming) {
-            incoming.volume = volumeRef.current;
-            incoming.currentTime = 0;
-            void incoming.play().catch(() => undefined);
-            adoptPartner(target);
-            return;
-          }
-        }
-        submitScrobble(currentRef.current);
-        advanceRef.current(1);
-      };
-      element.addEventListener("timeupdate", onTime);
-      element.addEventListener("durationchange", onDuration);
-      element.addEventListener("loadedmetadata", onDuration);
-      element.addEventListener("play", onPlay);
-      element.addEventListener("pause", onPause);
-      element.addEventListener("error", onError);
-      element.addEventListener("ended", onEnded);
-      return () => {
-        element.removeEventListener("timeupdate", onTime);
-        element.removeEventListener("durationchange", onDuration);
-        element.removeEventListener("loadedmetadata", onDuration);
-        element.removeEventListener("play", onPlay);
-        element.removeEventListener("pause", onPause);
-        element.removeEventListener("error", onError);
-        element.removeEventListener("ended", onEnded);
-      };
-    });
-    return () => disposers.forEach((dispose) => dispose());
+      }
+      submitScrobble(currentRef.current);
+      advanceRef.current(1);
+    };
+    element.addEventListener("timeupdate", onTime);
+    element.addEventListener("durationchange", onDuration);
+    element.addEventListener("loadedmetadata", onDuration);
+    element.addEventListener("play", onPlay);
+    element.addEventListener("pause", onPause);
+    element.addEventListener("error", onError);
+    element.addEventListener("ended", onEnded);
+    return () => {
+      element.removeEventListener("timeupdate", onTime);
+      element.removeEventListener("durationchange", onDuration);
+      element.removeEventListener("loadedmetadata", onDuration);
+      element.removeEventListener("play", onPlay);
+      element.removeEventListener("pause", onPause);
+      element.removeEventListener("error", onError);
+      element.removeEventListener("ended", onEnded);
+    };
   }, [adoptPartner, beginCrossfade, partner, recoverPlayback, submitScrobble]);
 
   useEffect(() => {
-    const element = audio();
-    if (!element || !current) return;
+    const unbind = unbinders.current;
+    for (const element of elementsRef.current) {
+      if (!element) continue;
+      element.volume = volumeRef.current;
+      unbind.set(element, bindElement(element));
+    }
+    return () => {
+      unbind.forEach((dispose) => dispose());
+      unbind.clear();
+    };
+  }, [bindElement]);
+
+  /// The element for `slot`, swapped for a fresh one first if the equalizer
+  /// left it routed through Web Audio and is now off. Only called where the
+  /// element is about to take a new `src` anyway, so the swap has no seam to
+  /// hear. A gapless or crossfading listener never hits a hard load, which is
+  /// why the preload path calls this too: both elements are back on the plain
+  /// path within two tracks either way.
+  const freshElement = useCallback((slot: 0 | 1) => {
+    const old = elementsRef.current[slot];
+    const graph = equalizerRef.current;
+    if (!old || !graph?.shouldReplace(old)) return old;
+    const fresh = createElement();
+    if (!fresh) return old;
+    // Pause while still bound, so a playing element reports the pause the
+    // same way an in-place reload would.
+    old.pause();
+    unbinders.current.get(old)?.();
+    unbinders.current.delete(old);
+    old.removeAttribute("src");
+    old.load();
+    fresh.volume = volumeRef.current;
+    elementsRef.current[slot] = fresh;
+    unbinders.current.set(fresh, bindElement(fresh));
+    graph.replace(old, fresh);
+    return fresh;
+  }, [bindElement]);
+
+  useEffect(() => {
+    if (!audio() || !current) return;
     if (alreadyPlaying.current === index) {
       // The audio for this index is the element we just adopted.
       alreadyPlaying.current = undefined;
       setError(undefined);
       return;
     }
+    const element = freshElement(activeSlot.current);
+    if (!element) return;
     let active = true;
     if (recoveryTimer.current !== undefined) {
       window.clearTimeout(recoveryTimer.current);
       recoveryTimer.current = undefined;
     }
     setError(undefined);
+    setFailed(false);
     completedTrack.current = undefined;
     publishedSecond.current = -1;
     setPosition(pendingPosition.current);
@@ -466,7 +531,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
         if (active) recoverPlayback(typeof reason === "string" ? reason : "Could not prepare this track.");
       });
     return () => { active = false };
-  }, [audio, current?.id, index, loadToken, notePlayed, recoverPlayback]);
+  }, [audio, current?.id, freshElement, index, loadToken, notePlayed, recoverPlayback]);
 
   // Stage the next track on the idle element. This is what makes the join
   // gapless and what a crossfade ramps into.
@@ -485,8 +550,9 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     let active = true;
     void invoke<string>("media_url", { kind: "stream", id: song.id })
       .then((url) => {
-        const idle = partner();
-        if (!active || !idle) return;
+        if (!active) return;
+        const idle = freshElement(activeSlot.current === 0 ? 1 : 0);
+        if (!idle) return;
         idle.volume = 0;
         idle.src = url;
         idle.load();
@@ -494,7 +560,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
       })
       .catch(() => undefined);
     return () => { active = false };
-  }, [index, nextIndex, options.crossfadeSeconds, options.gapless, partner, queue, repeat]);
+  }, [freshElement, index, nextIndex, options.crossfadeSeconds, options.gapless, queue, repeat]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -526,19 +592,80 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     shouldAutoplay.current = autoplay;
     skipDirection.current = 1;
     pendingPosition.current = Math.max(0, startPosition);
-    shuffleOrder.current = reshuffle(songs, safeIndex);
-    shuffleCursor.current = 0;
-    setQueue(songs);
-    setIndex(safeIndex);
+    // Replaying the queue already loaded, as a Group Session does to seek
+    // into it, keeps its order. A new list starts from the chosen song and,
+    // with shuffle on, shuffles the rest behind it.
+    let ordered = songs;
+    let start = safeIndex;
+    if (songs !== queueRef.current) {
+      contextRef.current = songs;
+      if (shuffleRef.current && songs.length > 1) {
+        ordered = [songs[safeIndex], ...shuffleSongs(songs.filter((_, position) => position !== safeIndex))];
+        start = 0;
+      }
+    }
+    setQueue(ordered);
+    setIndex(start);
     setManualQueueCount(0);
     setUndoQueue(undefined);
     setContextLabel(label);
     setLoadToken((value) => value + 1);
+  }, [releasePartner, shuffleSongs]);
+
+  /// Plays a row of the queue without rebuilding it. Rows the playhead passes
+  /// become history, and songs added by hand stay next in line.
+  const jumpTo = useCallback((target: number) => {
+    const items = queueRef.current;
+    const at = indexRef.current;
+    const count = manualQueueCountRef.current;
+    if (target <= at || target >= items.length) return;
+    const manual = items.slice(at + 1, at + 1 + count);
+    let next: SongSummary[];
+    let playhead: number;
+    let nextCount: number;
+    if (target <= at + count) {
+      const picked = target - at - 1;
+      next = [...items.slice(0, at + 1), manual[picked], ...manual.filter((_, position) => position !== picked), ...items.slice(at + 1 + count)];
+      playhead = at + 1;
+      nextCount = count - 1;
+    } else {
+      next = [...items.slice(0, at + 1), ...items.slice(at + 1 + count, target), items[target], ...manual, ...items.slice(target + 1)];
+      playhead = target - count;
+      nextCount = count;
+    }
+    releasePartner();
+    alreadyPlaying.current = undefined;
+    shouldAutoplay.current = true;
+    skipDirection.current = 1;
+    pendingPosition.current = 0;
+    setQueue(next);
+    setIndex(playhead);
+    setManualQueueCount(nextCount);
+    setLoadToken((value) => value + 1);
   }, [releasePartner]);
+
+  /// Tries the failed song again from where it stopped.
+  const retry = useCallback(() => {
+    const track = currentRef.current;
+    if (!track) return;
+    failures.current.delete(track.id);
+    if (recoveryTimer.current !== undefined) {
+      window.clearTimeout(recoveryTimer.current);
+      recoveryTimer.current = undefined;
+    }
+    setFailed(false);
+    setError(undefined);
+    shouldAutoplay.current = true;
+    setLoadToken((value) => value + 1);
+  }, []);
 
   const toggle = useCallback(async () => {
     const element = audio();
     if (!element || !current) return;
+    if (failed) {
+      retry();
+      return;
+    }
     if (element.paused) {
       shouldAutoplay.current = true;
       await element.play().catch(() => setError("Playback was blocked. Choose the track again."));
@@ -546,7 +673,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
       cancelFade();
       element.pause();
     }
-  }, [audio, cancelFade, current]);
+  }, [audio, cancelFade, current, failed, retry]);
 
   const seek = useCallback((seconds: number) => {
     const element = audio();
@@ -615,17 +742,33 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     setVolumeState(safe);
   }, [audio]);
 
+  /// Like iOS, shuffle acts on what is already queued. On shuffles the whole
+  /// list, songs above the current one too, into the rows behind the songs
+  /// added by hand. Off puts the list back in its own order from where the
+  /// current song sits in it. The current song never moves or restarts.
   const setShuffle = useCallback((value: boolean | ((current: boolean) => boolean)) => {
-    setShuffleState((currentValue) => {
-      const nextValue = typeof value === "function" ? value(currentValue) : value;
-      if (nextValue !== currentValue) {
-        shuffleOrder.current = reshuffleRef.current(queueRef.current, index);
-        shuffleCursor.current = 0;
-        preloaded.current = undefined;
-      }
-      return nextValue;
-    });
-  }, [index, queue.length]);
+    const was = shuffleRef.current;
+    const on = typeof value === "function" ? value(was) : value;
+    if (on === was) return;
+    shuffleRef.current = on;
+    setShuffleState(on);
+    const items = queueRef.current;
+    const at = indexRef.current;
+    const playing = items[at];
+    if (!playing) return;
+    const context = contextRef.current;
+    let upcoming: SongSummary[];
+    if (on) {
+      const skip = context.findIndex((song) => song.id === playing.id);
+      upcoming = shuffleSongs(context.filter((_, position) => position !== skip));
+    } else {
+      const anchor = contextAnchor(items, at, context);
+      if (anchor < 0) return;
+      upcoming = context.slice(anchor + 1);
+    }
+    setQueue([...items.slice(0, at + 1 + manualQueueCountRef.current), ...upcoming]);
+    preloaded.current = undefined;
+  }, [shuffleSongs]);
 
   const cycleRepeat = useCallback(() => setRepeat((value) => value === "off" ? "all" : value === "all" ? "one" : "off"), []);
   const recordUndo = useCallback((label: string) => {
@@ -634,6 +777,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
       queue: queueRef.current,
       index: indexRef.current,
       manualQueueCount: manualQueueCountRef.current,
+      context: contextRef.current,
     });
   }, []);
   const enqueue = useCallback((song: SongSummary) => {
@@ -661,24 +805,32 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     if (target < index) setIndex((value) => value - 1);
     preloaded.current = undefined;
   }, [index, recordUndo]);
+  /// Moves an upcoming row anywhere in Up Next, as iOS does. `to` is the
+  /// row's index after the move, and where it lands decides its kind: above
+  /// the line it counts as added by hand, below it as part of the list. A row
+  /// dropped exactly on the line keeps the kind it had.
   const moveQueueItem = useCallback((from: number, to: number) => {
-    if (from === to || from < 0 || to < 0 || from >= queue.length || to >= queue.length) return;
+    const items = queueRef.current;
+    const at = indexRef.current;
+    if (from === to || from <= at || to <= at || from >= items.length || to >= items.length) return;
+    const count = manualQueueCountRef.current;
+    const fromAdded = from <= at + count;
+    const addedAfterRemoval = fromAdded ? count - 1 : count;
+    const landing = to - at - 1;
+    const toAdded = landing < addedAfterRemoval || (landing === addedAfterRemoval && fromAdded);
     recordUndo("Reordered the queue");
-    setQueue((items) => {
-      const next = [...items];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-    if (from === index) setIndex(to);
-    else if (from < index && to >= index) setIndex((value) => value - 1);
-    else if (from > index && to <= index) setIndex((value) => value + 1);
+    const next = [...items];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setQueue(next);
+    setManualQueueCount(addedAfterRemoval + (toAdded ? 1 : 0));
     preloaded.current = undefined;
-  }, [index, queue, recordUndo]);
+  }, [recordUndo]);
   const clearUpcoming = useCallback(() => {
     if (!current) return;
     recordUndo("Cleared the upcoming queue");
     releasePartner();
+    contextRef.current = [current];
     setQueue([current]);
     setIndex(0);
     setManualQueueCount(0);
@@ -697,6 +849,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     setQueue(undoQueue.queue);
     setIndex(undoQueue.index);
     setManualQueueCount(undoQueue.manualQueueCount);
+    contextRef.current = undoQueue.context;
     setUndoQueue(undefined);
     preloaded.current = undefined;
   }, [undoQueue]);
@@ -707,26 +860,37 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     if (!active || !songs.length) return;
     const activeIndex = songs.findIndex((song) => song.id === active.id);
     if (activeIndex < 0) return;
+    // The sender's list is already in the order it plays, so it is taken as
+    // given and not reshuffled.
     alreadyPlaying.current = activeIndex;
+    contextRef.current = songs;
     setQueue(songs);
     setIndex(activeIndex);
     setManualQueueCount(0);
-    shuffleOrder.current = reshuffle(songs, activeIndex);
-    shuffleCursor.current = 0;
     preloaded.current = undefined;
   }, []);
 
-  /// Appends without disturbing what is playing — how autoplay extends a queue
-  /// that ran out.
-  const appendToQueue = useCallback((songs: SongSummary[]) => {
-    if (!songs.length) return;
-    shuffleOrder.current = [];
-    setQueue((items) => {
-      const known = new Set(items.map((item) => item.id));
-      const fresh = songs.filter((song) => !known.has(song.id));
-      return fresh.length ? [...items, ...fresh] : items;
-    });
-  }, []);
+  /// Appends without disturbing what is playing, which is how autoplay
+  /// extends a queue before it runs out. `playFirst` also starts the first
+  /// appended song, for a queue that already ended.
+  const appendToQueue = useCallback((songs: SongSummary[], playFirst = false) => {
+    const items = queueRef.current;
+    const known = new Set(items.map((item) => item.id));
+    const fresh = songs.filter((song) => !known.has(song.id));
+    if (!fresh.length) return;
+    const listed = new Set(contextRef.current.map((song) => song.id));
+    contextRef.current = [...contextRef.current, ...fresh.filter((song) => !listed.has(song.id))];
+    setQueue([...items, ...fresh]);
+    preloaded.current = undefined;
+    if (!playFirst) return;
+    releasePartner();
+    alreadyPlaying.current = undefined;
+    shouldAutoplay.current = true;
+    skipDirection.current = 1;
+    pendingPosition.current = 0;
+    setIndex(items.length);
+    setLoadToken((value) => value + 1);
+  }, [releasePartner]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -791,13 +955,14 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   }, []);
 
   return useMemo(() => ({
-    current, queue, index, isPlaying, position, duration, volume, shuffle, repeat, contextLabel, error,
+    current, queue, index, isPlaying, position, duration, volume, shuffle, repeat, contextLabel, error, failed,
+    hasNext: nextIndex(1) >= 0, retry, continueAfterFailure: () => advance(1),
     trackDirection: skipDirection.current,
     manualQueueCount, undoQueueLabel: undoQueue?.label,
-    playQueue, toggle, next: () => advance(1), previous: () => position > 4 ? seek(0) : advance(-1),
+    playQueue, jumpTo, toggle, next: () => advance(1), previous: () => position > 4 ? seek(0) : advance(-1),
     seek, setVolume, setShuffle, cycleRepeat, enqueue, playNext, removeQueueItem, moveQueueItem, clearUpcoming, clearManualQueue, undoQueueMutation,
     replaceQueuePreservingCurrent, appendToQueue, positionNow, convergeRate, endConvergence,
-  }), [advance, appendToQueue, clearManualQueue, clearUpcoming, contextLabel, convergeRate, current, cycleRepeat, duration, endConvergence, enqueue, error, index, isPlaying,
+  }), [advance, appendToQueue, failed, nextIndex, retry, clearManualQueue, clearUpcoming, contextLabel, convergeRate, current, cycleRepeat, duration, endConvergence, enqueue, error, index, isPlaying, jumpTo,
     manualQueueCount, moveQueueItem, playNext, playQueue, position, positionNow, queue, removeQueueItem, repeat, replaceQueuePreservingCurrent, seek, setShuffle, setVolume,
     shuffle, toggle, undoQueue, undoQueueMutation, volume]);
 }
