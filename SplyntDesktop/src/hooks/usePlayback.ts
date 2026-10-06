@@ -25,6 +25,33 @@ export type PlaybackOptions = {
   gapless: boolean;
   autoplay: boolean;
   onQueueExhausted?: (last: SongSummary) => void;
+  /// Where the OS media keys go while this player mirrors another device.
+  /// Without it they would act on audio elements that hold nothing.
+  onMirrorAction?: (action: "play" | "pause" | "next" | "previous" | "seek", value?: number) => void;
+};
+
+/// Another Splynt device's playback, shown here without playing it. See
+/// `mirrorQueue`.
+export type MirrorState = {
+  isPlaying: boolean;
+  position: number;
+  duration: number;
+  shuffle?: boolean;
+  repeat?: RepeatMode;
+  volume?: number;
+  /// When `position` was true, for reading the playhead between updates.
+  at: number;
+};
+
+/// Set on a controller that drives another device instead of local audio.
+/// The player UI reads it to name the device and to disable what that device
+/// cannot be told to do.
+export type RemoteControl = {
+  id: string;
+  name: string;
+  platform?: string;
+  /// False for a v1 peer: no shuffle, repeat, volume or queue editing.
+  controls: boolean;
 };
 
 const STORAGE_KEY = "splice.playback.v2";
@@ -159,6 +186,11 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   // Set once the automatic retry has also failed. Playback stops on the
   // failed song and waits for Retry, Continue or Start Radio, as on iOS.
   const [failed, setFailed] = useState(false);
+  /// Set while this player shows another device's playback. Audio stays
+  /// untouched: nothing loads, nothing scrobbles, and the elements stay paused.
+  const [mirror, setMirror] = useState<MirrorState>();
+  const mirrorRef = useRef(mirror);
+  mirrorRef.current = mirror;
   const shouldAutoplay = useRef(false);
   const pendingPosition = useRef(initial.position);
   const contextRef = useRef<SongSummary[]>(initial.context ?? initial.queue);
@@ -490,7 +522,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   }, [bindElement]);
 
   useEffect(() => {
-    if (!audio() || !current) return;
+    if (!audio() || !current || mirrorRef.current) return;
     if (alreadyPlaying.current === index) {
       // The audio for this index is the element we just adopted.
       alreadyPlaying.current = undefined;
@@ -533,10 +565,12 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     return () => { active = false };
   }, [audio, current?.id, freshElement, index, loadToken, notePlayed, recoverPlayback]);
 
+  const mirroring = mirror !== undefined;
+
   // Stage the next track on the idle element. This is what makes the join
   // gapless and what a crossfade ramps into.
   useEffect(() => {
-    if (!options.gapless && options.crossfadeSeconds <= 0) {
+    if (mirroring || (!options.gapless && options.crossfadeSeconds <= 0)) {
       preloaded.current = undefined;
       return;
     }
@@ -560,7 +594,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
       })
       .catch(() => undefined);
     return () => { active = false };
-  }, [freshElement, index, nextIndex, options.crossfadeSeconds, options.gapless, queue, repeat]);
+  }, [freshElement, index, mirroring, nextIndex, options.crossfadeSeconds, options.gapless, queue, repeat]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -587,6 +621,9 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   const playQueue = useCallback((songs: SongSummary[], startIndex = 0, autoplay = true, startPosition = 0, label = "Queue") => {
     if (!songs.length) return;
     const safeIndex = Math.min(Math.max(0, startIndex), songs.length - 1);
+    // Playing here is the end of mirroring anywhere else.
+    mirrorRef.current = undefined;
+    setMirror(undefined);
     releasePartner();
     alreadyPlaying.current = undefined;
     shouldAutoplay.current = autoplay;
@@ -661,7 +698,7 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
 
   const toggle = useCallback(async () => {
     const element = audio();
-    if (!element || !current) return;
+    if (!element || !current || mirrorRef.current) return;
     if (failed) {
       retry();
       return;
@@ -693,6 +730,12 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   /// inherited up to a second of error both in the clock it published and in
   /// the drift it computed against another device's clock. Those read this.
   const positionNow = useCallback(() => {
+    const shown = mirrorRef.current;
+    if (shown) {
+      if (!shown.isPlaying) return shown.position;
+      const moved = shown.position + (Date.now() - shown.at) / 1000;
+      return shown.duration > 0 ? Math.min(moved, shown.duration) : moved;
+    }
     const element = audio();
     if (element && element.readyState > 0 && Number.isFinite(element.currentTime)) {
       return Math.max(0, element.currentTime);
@@ -771,6 +814,8 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   }, [shuffleSongs]);
 
   const cycleRepeat = useCallback(() => setRepeat((value) => value === "off" ? "all" : value === "all" ? "one" : "off"), []);
+  /// An absolute mode, for a Splynt Connect controller.
+  const setRepeatMode = useCallback((mode: RepeatMode) => setRepeat(mode), []);
   const recordUndo = useCallback((label: string) => {
     setUndoQueue({
       label,
@@ -870,6 +915,76 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     preloaded.current = undefined;
   }, []);
 
+  /// Shows another device's queue without playing it.
+  ///
+  /// A desktop following an iPhone used to keep its own track identity while
+  /// borrowing only the phone's play state, so a skip on the phone left the
+  /// bar, lyrics, like state and queue all on the old song. Mirroring into
+  /// this controller means every one of those follows by reading `current`,
+  /// as they already do. The audio elements are paused and left alone, so
+  /// following can never make this computer audible.
+  const mirrorQueue = useCallback((songs: SongSummary[], startIndex: number, label?: string) => {
+    if (!songs.length) return;
+    if (!mirrorRef.current) {
+      cancelFade();
+      releasePartner();
+      for (const element of elementsRef.current) element?.pause();
+      const entering: MirrorState = { isPlaying: false, position: 0, duration: 0, at: Date.now() };
+      mirrorRef.current = entering;
+      setMirror(entering);
+    }
+    const safeIndex = Math.min(Math.max(0, startIndex), songs.length - 1);
+    alreadyPlaying.current = undefined;
+    setQueue(songs);
+    setIndex(safeIndex);
+    setManualQueueCount(0);
+    setUndoQueue(undefined);
+    contextRef.current = songs;
+    if (label !== undefined) setContextLabel(label);
+  }, [cancelFade, releasePartner]);
+
+  /// The followed device's clock, play state and modes. Only fields given
+  /// change; the rest keep what the last update said.
+  const mirrorState = useCallback((state: Partial<Omit<MirrorState, "at">>) => {
+    const previous = mirrorRef.current;
+    if (!previous) return;
+    const next: MirrorState = { ...previous, ...state, at: state.position !== undefined ? Date.now() : previous.at };
+    if (state.position === undefined && state.isPlaying !== undefined && state.isPlaying !== previous.isPlaying) {
+      // A play state flip keeps the playhead where it had reached.
+      next.position = positionNow();
+      next.at = Date.now();
+    }
+    mirrorRef.current = next;
+    setMirror(next);
+  }, [positionNow]);
+
+  /// Stops mirroring and loads the current track here at `position`,
+  /// playing only when `play` is true. Used when the listener picks this
+  /// computer, and when the followed device leaves the network.
+  const endMirror = useCallback(({ play, position }: { play: boolean; position: number }) => {
+    if (!mirrorRef.current) return;
+    mirrorRef.current = undefined;
+    setMirror(undefined);
+    alreadyPlaying.current = undefined;
+    shouldAutoplay.current = play;
+    pendingPosition.current = Math.max(0, position);
+    setLoadToken((value) => value + 1);
+  }, []);
+
+  /// Whether this player mirrors another device right now, read from the ref
+  /// rather than render state. Snapshot handling runs between renders, so
+  /// `mirroring` from the last render can be a step behind a `mirrorQueue`
+  /// call made a line earlier.
+  const isMirroring = useCallback(() => mirrorRef.current !== undefined, []);
+
+  /// Plays a row of the queue, as the Queue panel's rows do: an upcoming row
+  /// through `jumpTo`, so songs added by hand stay queued, and an earlier one
+  /// by replaying the loaded queue in its own order.
+  const skipTo = useCallback((target: number) => {
+    if (target > indexRef.current) jumpTo(target);
+    else playQueue(queueRef.current, target, true, 0, contextLabel);
+  }, [contextLabel, jumpTo, playQueue]);
+
   /// Appends without disturbing what is playing, which is how autoplay
   /// extends a queue before it runs out. `playFirst` also starts the first
   /// appended song, for a queue that already ended.
@@ -895,17 +1010,26 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
     const session = navigator.mediaSession;
-    session.setActionHandler("play", () => { const element = audio(); if (element?.paused) void element.play(); });
-    session.setActionHandler("pause", () => audio()?.pause());
-    session.setActionHandler("previoustrack", () => position > 4 ? seek(0) : advance(-1));
-    session.setActionHandler("nexttrack", () => advance(1));
-    session.setActionHandler("seekto", (details) => details.seekTime !== undefined && seek(details.seekTime));
+    const remote = optionsRef.current.onMirrorAction;
+    if (mirroring && remote) {
+      session.setActionHandler("play", () => remote("play"));
+      session.setActionHandler("pause", () => remote("pause"));
+      session.setActionHandler("previoustrack", () => remote("previous"));
+      session.setActionHandler("nexttrack", () => remote("next"));
+      session.setActionHandler("seekto", (details) => details.seekTime !== undefined && remote("seek", details.seekTime));
+    } else {
+      session.setActionHandler("play", () => { const element = audio(); if (element?.paused) void element.play(); });
+      session.setActionHandler("pause", () => audio()?.pause());
+      session.setActionHandler("previoustrack", () => position > 4 ? seek(0) : advance(-1));
+      session.setActionHandler("nexttrack", () => advance(1));
+      session.setActionHandler("seekto", (details) => details.seekTime !== undefined && seek(details.seekTime));
+    }
     return () => {
       for (const action of ["play", "pause", "previoustrack", "nexttrack", "seekto"] as MediaSessionAction[]) {
         session.setActionHandler(action, null);
       }
     };
-  }, [advance, audio, position, seek]);
+  }, [advance, audio, mirroring, position, seek]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator) || !current) return;
@@ -926,21 +1050,24 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.playbackState = current ? (isPlaying ? "playing" : "paused") : "none";
-  }, [current, isPlaying]);
+    const playing = mirror ? mirror.isPlaying : isPlaying;
+    navigator.mediaSession.playbackState = current ? (playing ? "playing" : "paused") : "none";
+  }, [current, isPlaying, mirror]);
 
   useEffect(() => {
-    if (!("mediaSession" in navigator) || !current || !Number.isFinite(duration) || duration <= 0) return;
+    const shownDuration = mirror ? mirror.duration : duration;
+    const shownPosition = mirror ? mirror.position : position;
+    if (!("mediaSession" in navigator) || !current || !Number.isFinite(shownDuration) || shownDuration <= 0) return;
     try {
       navigator.mediaSession.setPositionState({
-        duration,
-        playbackRate: audio()?.playbackRate ?? 1,
-        position: Math.max(0, Math.min(position, duration)),
+        duration: shownDuration,
+        playbackRate: mirror ? 1 : audio()?.playbackRate ?? 1,
+        position: Math.max(0, Math.min(shownPosition, shownDuration)),
       });
     } catch {
       // Some webviews expose Media Session before position updates are supported.
     }
-  }, [audio, current, duration, position]);
+  }, [audio, current, duration, mirror, position]);
 
   useEffect(() => () => {
     if (recoveryTimer.current !== undefined) window.clearTimeout(recoveryTimer.current);
@@ -954,17 +1081,31 @@ export function usePlayback(storageScope = "default", options: PlaybackOptions =
     }
   }, []);
 
+  // While mirroring, the state a listener sees is the followed device's.
+  // `rendering` is always this computer's own audio, which is what Splynt
+  // Connect publishes and what decides whether this computer may follow.
   return useMemo(() => ({
-    current, queue, index, isPlaying, position, duration, volume, shuffle, repeat, contextLabel, error, failed,
+    current, queue, index,
+    isPlaying: mirror ? mirror.isPlaying : isPlaying,
+    position: mirror ? mirror.position : position,
+    duration: mirror ? mirror.duration || current?.duration || 0 : duration,
+    volume: mirror?.volume ?? volume,
+    shuffle: mirror?.shuffle ?? shuffle,
+    repeat: mirror?.repeat ?? repeat,
+    contextLabel, error: mirror ? undefined : error, failed: mirror ? false : failed,
     hasNext: nextIndex(1) >= 0, retry, continueAfterFailure: () => advance(1),
+    rendering: !mirror && isPlaying,
+    mirroring,
+    remote: undefined as RemoteControl | undefined,
     trackDirection: skipDirection.current,
     manualQueueCount, undoQueueLabel: undoQueue?.label,
     playQueue, jumpTo, toggle, next: () => advance(1), previous: () => position > 4 ? seek(0) : advance(-1),
     seek, setVolume, setShuffle, cycleRepeat, enqueue, playNext, removeQueueItem, moveQueueItem, clearUpcoming, clearManualQueue, undoQueueMutation,
     replaceQueuePreservingCurrent, appendToQueue, positionNow, convergeRate, endConvergence,
-  }), [advance, appendToQueue, failed, nextIndex, retry, clearManualQueue, clearUpcoming, contextLabel, convergeRate, current, cycleRepeat, duration, endConvergence, enqueue, error, index, isPlaying, jumpTo,
-    manualQueueCount, moveQueueItem, playNext, playQueue, position, positionNow, queue, removeQueueItem, repeat, replaceQueuePreservingCurrent, seek, setShuffle, setVolume,
-    shuffle, toggle, undoQueue, undoQueueMutation, volume]);
+    skipTo, mirrorQueue, mirrorState, endMirror, setRepeatMode, isMirroring,
+  }), [advance, appendToQueue, failed, nextIndex, retry, clearManualQueue, clearUpcoming, contextLabel, convergeRate, current, cycleRepeat, duration, endConvergence, endMirror, enqueue, error, index, isMirroring, isPlaying, jumpTo,
+    manualQueueCount, mirror, mirrorQueue, mirrorState, mirroring, moveQueueItem, playNext, playQueue, position, positionNow, queue, removeQueueItem, repeat, replaceQueuePreservingCurrent, seek, setShuffle, setVolume,
+    setRepeatMode, shuffle, skipTo, toggle, undoQueue, undoQueueMutation, volume]);
 }
 
 export type PlaybackController = ReturnType<typeof usePlayback>;

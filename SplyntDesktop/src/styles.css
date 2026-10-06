@@ -2548,3 +2548,42 @@ button.now-panel__title:hover, button.now-panel__artist:hover { color: #fff; tex
 .lyrics-matches strong { font-size: 14px; }
 .lyrics-matches small { color: #a7a7a7; font-size: 12px; }
 .lyrics-matches em { color: #d4d4d4; font-size: 12.5px; font-style: italic; }
+
+/* Splynt Connect follow mode. While this computer follows another device the
+   player grows a green strip under it, as Spotify's does, and every surface
+   that sits above the player reads the taller height from this variable. */
+.desktop-shell--remote { --player-height: 96px; }
+.desktop-player--remote { grid-template-rows: minmax(0, 1fr) 24px; row-gap: 0; }
+.player-remote-strip {
+  grid-column: 1 / -1;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+  margin: 0 -8px;
+  padding: 0 22px;
+  border: 0;
+  color: #000;
+  background: var(--green);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.player-remote-strip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-remote-strip:hover { filter: brightness(1.06); }
+.player-remote-strip > svg { flex: none; }
+.desktop-player button:disabled,
+.desktop-player input:disabled { cursor: not-allowed; opacity: .4; }
+
+/* "This computer" is a choosable device, so it is a button now. */
+button.connect-local { width: 100%; color: #fff; font: inherit; text-align: left; cursor: pointer; }
+button.connect-local:hover:not(:disabled) { border-color: rgba(255,255,255,.2); background: rgba(255,255,255,.07); }
+button.connect-local:disabled { cursor: default; }
+.connect-local--active strong,
+.connect-device--active .connect-device__identity strong { color: var(--green); }
+.connect-device--active { box-shadow: inset 0 0 0 1px rgba(43,224,107,.35); }
+.connect-device--active .connect-device__role { color: #07190d; background: var(--green); }
+.connect-device__note { margin: 0; color: #9a9a9a; font-size: 10px; line-height: 1.4; }
+.queue-remote-note { margin: 0 0 10px; color: #9a9a9a; font-size: 11px; }

@@ -135,21 +135,33 @@ Clicking the compact artwork toggles the Now Playing context panel. Only the ded
 
 ### Playing on another device
 
-Handing playback to a peer does not silence this window; it turns it into a
-remote for that peer, matching the iOS client. While the mode is active:
+Whichever Splynt device is playing is the active device, as in Spotify
+Connect. This window follows it automatically while it plays nothing of its
+own, under the rules in `docs/connect/WIRE-V1.md` ("Following the active
+device"), and the listener can also choose a device in the Devices panel.
+While it follows:
 
-- the player bar and expanded player send absolute transport commands to that
-  device instead of driving local audio;
-- play state, position and duration come from the peer's published clock, while
-  track identity stays local — the same queue is deliberately held here, paused;
-- starting new content sends it to that device and loads it here paused, so the
-  queue view and "Play here" stay truthful;
-- the bar shows "Playing on <device>", which opens the Devices panel.
+- the player bar, Now Playing panel, queue, lyrics and expanded player show
+  the followed device's track, queue, play state, shuffle, repeat and volume,
+  mirrored into the local player without loading any audio;
+- every control goes to that device: play and pause, next, previous, seek,
+  shuffle, repeat, volume, a queue row, Add to queue, Play next, and starting
+  any song, album, playlist or radio, which hands it that queue;
+- the queue panel offers no remove, reorder or clear, because no command does
+  that to another device's queue;
+- a full-width green strip under the player bar reads "Playing on <device>"
+  with the device's icon and opens the Devices panel;
+- the position shown is projected from the moment the transport received the
+  device's frame, so it moves in step without waiting for the next one.
 
-The mode ends when the listener plays the peer's audio here, or when the peer
-stops appearing on the network. Position shown for a remote device is still a
-sample republished every couple of seconds, interpolated locally between
-frames — an anchor-based clock is protocol v2 work.
+A device on a Splynt release from before the remote control extension cannot
+be told to change shuffle, repeat, volume or its queue. Those controls are
+disabled with a tooltip saying the device needs an update.
+
+In the Devices panel, This computer is the first row. Choosing it moves
+playback here with the same queue, track and position, and pauses the device
+that was playing. Following also ends when the followed device leaves the
+network, which leaves its queue loaded here, paused.
 
 ### Expanded player
 

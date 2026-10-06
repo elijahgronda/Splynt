@@ -356,6 +356,7 @@ pub fn run() {
             subsonic::media_url,
             subsonic::set_playback_prefs,
             connect::publish_connect_playback,
+            connect::publish_connect_queue,
             connect::connect_snapshot,
             connect::send_connect_command
         ])

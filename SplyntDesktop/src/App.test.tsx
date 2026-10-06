@@ -192,9 +192,11 @@ describe("Splynt Desktop authentication", () => {
       server: { displayHost: "music.example.test", username: "elijah", serverType: "navidrome" },
       albums: [album],
     };
+    // Paused, so this computer does not follow it on its own: the test is
+    // about choosing it. It starts playing when the handoff reaches it.
     const peer = {
       id: "peer-tv", name: "Living Room", platform: "tvOS",
-      playback: { trackID: "server-song-1", title: "Server Song", artist: "Server Artist", album: "Server Album", coverArtID: "cover", isPlaying: true, position: 12, duration: 200 },
+      playback: { trackID: "server-song-1", title: "Server Song", artist: "Server Artist", album: "Server Album", coverArtID: "cover", isPlaying: false, position: 12, duration: 200 },
       updatedAt: 0,
     };
     const sent: { peerId: string; command: { name: string; value?: number } }[] = [];
@@ -207,7 +209,9 @@ describe("Splynt Desktop authentication", () => {
       if (command === "media_url") return Promise.resolve("splice-media://localhost/media?id=server-song-1");
       if (command === "connect_snapshot") return Promise.resolve({ isAvailable: true, localDeviceId: "this-desktop", peers: [peer], commands: [] });
       if (command === "send_connect_command") {
-        sent.push(args as { peerId: string; command: { name: string } });
+        const entry = args as { peerId: string; command: { name: string } };
+        sent.push(entry);
+        if (entry.command.name === "handoff") peer.playback.isPlaying = true;
         return Promise.resolve(undefined);
       }
       return Promise.resolve(undefined);
@@ -239,7 +243,7 @@ describe("Splynt Desktop authentication", () => {
     expect(sent.every((entry) => entry.peerId === "peer-tv")).toBe(true);
 
     // Play state is the peer's, not this device's silent audio element.
-    expect(within(bar).getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(await within(bar).findByRole("button", { name: "Pause" })).toBeInTheDocument();
 
     // Taking it back ends the mode. The button says which computer "here" is:
     // it used to sit beside "Play on Living Room" at equal weight, with the

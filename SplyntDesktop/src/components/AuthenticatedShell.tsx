@@ -14,6 +14,10 @@ import { dedupeAlbums, dedupeArtists, dedupeSearchResults, parseExternalSource, 
 import { isExternalLiked, mergeExternalLikes, setExternalLiked } from "../lib/externalLikes";
 import { cacheDetail, cachedDetail, cacheHome, cacheLibraryOverview, cachedDataFor } from "../lib/persistence";
 import { driftCorrection, projectedGroupPosition } from "../lib/connectClock";
+import {
+  DROP_COOLDOWN_SECONDS, TRACK_GUARD_MS, decideFollow, deviceName, followPeers, hasRemoteControl, notePeerActivity,
+  projectedPeerPosition, repeatFromWire, repeatToWire, trackGuardIgnores, type PeerActivity, type TrackGuard,
+} from "../lib/connectFollow";
 import { endGroupDiagnostics, logConnectEvent, noteGroupSample, noteGroupTrackChange } from "../lib/connectDiagnostics";
 import { readRecentCollections, rememberRecentCollection } from "../lib/recentCollections";
 import { readRecentlyPlayed, rememberPlayed } from "../lib/recentlyPlayed";
@@ -21,7 +25,7 @@ import { useSettings } from "../lib/settings";
 import { useTooltips } from "../hooks/useTooltips";
 import type {
   AlbumDetail, AlbumSummary, AutoplayStatus, ArtistDetail, ArtistSummary, ConnectedLibrary, ConnectCommand,
-  ConnectGroup, ConnectPeer, ConnectSnapshot, ContextPanelMode, DesktopRoute, HomeOverview, HomeShortcut,
+  ConnectGroup, ConnectPeer, ConnectQueue, ConnectSnapshot, ContextPanelMode, DesktopRoute, HomeOverview, HomeShortcut,
   JumpBackInItem, LibraryOverview, ListeningSnapshot, LyricsIndexStatus, LyricsMatch, LyricsResult, PlayQueueSnapshot, PlaylistDetail, PlaylistSummary,
   RadioResult, SearchResults, SongSummary,
 } from "../types";
@@ -110,6 +114,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const profileScope = `${library.server.displayHost}|${library.server.username}`;
   const { settings, update: updateSetting, reset: resetSettings } = useSettings(profileScope);
   const queueExhausted = useRef<(last: SongSummary) => void>(() => undefined);
+  const mirrorAction = useRef<(action: "play" | "pause" | "next" | "previous" | "seek", value?: number) => void>(() => undefined);
   const playback = usePlayback(profileScope, {
     shuffleMode: settings.shuffleMode,
     crossfadeSeconds: settings.crossfadeSeconds,
@@ -117,6 +122,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     gapless: settings.gapless,
     autoplay: settings.autoplay,
     onQueueExhausted: (last) => queueExhausted.current(last),
+    onMirrorAction: (action, value) => mirrorAction.current(action, value),
   });
   const downloads = useDownloads();
   const playbackRef = useRef(playback);
@@ -167,13 +173,38 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   /// commands in a snapshot are applied in the same tick that delivered it,
   /// before React has published the new state.
   const clockOffsets = useRef<Record<string, number>>({});
-  /// The peer this device is currently acting as a remote for. iOS has always
-  /// had this mode (`connectedPeerID` in PlayerEngine); the desktop sent a
-  /// handoff, paused itself, and then its own transport drove nothing, so the
-  /// only way to control the other device was three small buttons in a panel.
-  const [remoteDevice, setRemoteDevice] = useState<{ id: string; name: string }>();
+  /// The peer this computer follows: the device playing, shown here as if it
+  /// were local, with every control driving it. iOS has the same mode
+  /// (`connectedPeerID` in PlayerEngine). Set by `beginFollow` and cleared by
+  /// `endFollow`, which keep `remoteRef` in step at once rather than a render
+  /// later, because snapshots are processed between renders.
+  const [remoteDevice, setRemoteDevice] = useState<{ id: string; name: string; platform?: string }>();
   const remoteRef = useRef(remoteDevice);
-  remoteRef.current = remoteDevice;
+  /// The latest snapshot, for work that finishes after a later poll.
+  const snapshotRef = useRef<ConnectSnapshot | undefined>(undefined);
+  /// When each peer started and stopped playing, for the follow rules.
+  const peerActivity = useRef<PeerActivity>({});
+  /// When this computer's own audio last stopped, or the listener last took
+  /// playback here. A paused computer follows only a device that started
+  /// after this. Undefined until something plays here.
+  const localStoppedAt = useRef<number | undefined>(undefined);
+  const droppedPeer = useRef<{ id: string; until: number } | undefined>(undefined);
+  const trackGuard = useRef<TrackGuard | undefined>(undefined);
+  /// Resolved songs by id, so a mirrored queue that changes by one row does
+  /// not resolve the other nine hundred again.
+  const songCache = useRef(new Map<string, SongSummary>());
+  /// The followed device's queue as mirrored here: its revision, and for each
+  /// local row that row's index in the device's whole queue, which `skipTo`
+  /// sends. Unresolvable rows are left out, so the two can differ.
+  const mirrorRows = useRef<{ peerId: string; revision: number; fullIndexes: number[] } | undefined>(undefined);
+  const queueApplying = useRef<string | undefined>(undefined);
+  const queueRequested = useRef<{ peerId: string; revision: number; at: number } | undefined>(undefined);
+  const mirrorGeneration = useRef(0);
+  /// Whether this computer has played audio since its queue was last loaded
+  /// from somewhere else. Only the device rendering audio may save the play
+  /// queue to the server; anything else overwrites the copy the device that
+  /// actually played saved.
+  const renderedHere = useRef(false);
   const [groupSession, setGroupSession] = useState<LocalGroupSession>();
   const groupRef = useRef(groupSession);
   groupRef.current = groupSession;
@@ -327,6 +358,32 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     setRecentlyPlayed((current) => current[0]?.id === song.id ? current : rememberPlayed(profileScope, current, song));
   }, [playback.current?.id, profileScope]);
 
+  const wasRendering = useRef(false);
+  useEffect(() => {
+    if (playback.rendering) renderedHere.current = true;
+    else if (wasRendering.current) localStoppedAt.current = Date.now() / 1000;
+    wasRendering.current = playback.rendering;
+  }, [playback.rendering]);
+
+  /// Songs for ids, resolved against the server in batches and cached. A song
+  /// that will not resolve comes back undefined rather than failing the rest.
+  const resolveSongs = useCallback(async (ids: string[]) => {
+    const missing = [...new Set(ids.filter((id) => !songCache.current.has(id)))];
+    for (let start = 0; start < missing.length; start += 100) {
+      try {
+        const songs = await invoke<SongSummary[]>("get_songs_by_ids", { ids: missing.slice(start, start + 100) });
+        for (const song of songs ?? []) songCache.current.set(song.id, song);
+      } catch {
+        // Left out below. One bad batch must not lose the rest of a queue.
+      }
+    }
+    if (songCache.current.size > 5_000) {
+      const keep = new Set(ids);
+      for (const id of songCache.current.keys()) if (!keep.has(id)) songCache.current.delete(id);
+    }
+    return ids.map((id) => songCache.current.get(id));
+  }, []);
+
   const reloadHome = useCallback(() => {
     setHomeError(undefined);
     invoke<HomeOverview>("load_home").then((raw) => {
@@ -378,7 +435,9 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     if (playbackRef.current.queue.length) return;
     void invoke<PlayQueueSnapshot | null>("get_play_queue")
       .then((snapshot) => {
-        if (!snapshot?.songs?.length || playbackRef.current.queue.length) return;
+        // A device already playing on the account is followed instead, and
+        // its queue is newer than anything the server holds.
+        if (!snapshot?.songs?.length || playbackRef.current.queue.length || remoteRef.current) return;
         const match = snapshot.currentId ? snapshot.songs.findIndex((song) => song.id === snapshot.currentId) : 0;
         playbackRef.current.playQueue(snapshot.songs, Math.max(0, match), false, snapshot.position, "Your queue");
         setToast("Queue restored from your other Splynt devices");
@@ -389,6 +448,10 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const saveServerQueue = useCallback(() => {
     const controller = playbackRef.current;
     if (offline || !controller.current || !controller.queue.length) return;
+    // Navidrome keeps one play queue per account. Saving it from a computer
+    // that is idle, or following a phone, replaced the phone's queue with
+    // whatever this computer last held, every five seconds.
+    if (remoteRef.current || controller.isMirroring() || !renderedHere.current) return;
     void invoke("save_play_queue", {
       ids: controller.queue.slice(0, 1_000).map((song) => song.id),
       currentId: controller.current.id,
@@ -404,7 +467,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
 
   useEffect(() => {
     if (offline) return;
-    const interval = window.setInterval(saveServerQueue, 5_000);
+    const interval = window.setInterval(() => { if (playbackRef.current.rendering) saveServerQueue(); }, 5_000);
     const onVisibility = () => { if (document.visibilityState === "hidden") saveServerQueue(); };
     document.addEventListener("visibilitychange", onVisibility);
     return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisibility); };
@@ -427,7 +490,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       setSleepRemaining(remaining);
       if (remaining > 0) return;
       setSleepAt(undefined);
-      if (playbackRef.current.isPlaying) void playbackRef.current.toggle();
+      if (transportRef.current.isPlaying) void transportRef.current.toggle();
       setToast("Sleep timer ended playback");
     };
     tick();
@@ -442,14 +505,15 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const loggedPlay = useRef<string | undefined>(undefined);
   useEffect(() => {
     const song = playback.current;
-    if (!song || remoteDevice) return;
+    // Another device's playback shown here is not a play on this computer.
+    if (!song || remoteDevice || playback.mirroring) return;
     if (loggedPlay.current === song.id && playback.position < 2) loggedPlay.current = undefined;
     if (loggedPlay.current === song.id) return;
     const total = playback.duration || song.duration || 0;
     if (!total || playback.position < total * 0.3) return;
     loggedPlay.current = song.id;
     setPlayLog(logPlay(profileScope, song));
-  }, [playback.current?.id, playback.duration, playback.position, profileScope, remoteDevice]);
+  }, [playback.current?.id, playback.duration, playback.mirroring, playback.position, profileScope, remoteDevice]);
 
   // Stats read Navidrome's record when the page opens, and fall back to the
   // log above when the server keeps none.
@@ -476,7 +540,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   const autoplayRef = useRef(autoplay);
   autoplayRef.current = autoplay;
   const lastInQueue = playback.index >= 0 && playback.index === playback.queue.length - 1;
-  const autoplaySeed = settings.autoplay && !offline && playback.repeat === "off" && !remoteDevice && !groupSession && lastInQueue
+  const autoplaySeed = settings.autoplay && !offline && playback.repeat === "off" && !remoteDevice && !playback.mirroring && !groupSession && lastInQueue
     ? playback.current
     : undefined;
   useEffect(() => {
@@ -743,7 +807,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       const run = (action: () => void) => { event.preventDefault(); action(); };
       if (modifier && event.key.toLowerCase() === "k") run(() => document.querySelector<HTMLInputElement>("[data-search-input]")?.focus());
       else if (modifier && event.key === "/") run(() => setShortcutsOpen((value) => !value));
-      else if (!editable && event.code === "Space" && (!spaceOwner || rowOwner)) run(() => void playbackRef.current.toggle());
+      else if (!editable && event.code === "Space" && (!spaceOwner || rowOwner)) run(() => void transportRef.current.toggle());
       else if ((event.altKey && !event.shiftKey && event.key === "ArrowLeft") || (event.metaKey && event.key === "[")) run(goBack);
       else if ((event.altKey && !event.shiftKey && event.key === "ArrowRight") || (event.metaKey && event.key === "]")) run(goForward);
       else if ((modifier && event.shiftKey && event.key.toLowerCase() === "q") || (altShift && event.code === "KeyQ")) run(() => openPanel("queue"));
@@ -754,17 +818,17 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       else if (altShift && event.code === "KeyP") run(() => setCreatePlaylistOpen(true));
       else if (altShift && event.code === "KeyB") run(actions.likeCurrent);
       else if (modifier && event.key === ",") run(() => navigate({ kind: "settings" }));
-      else if (!editable && modifier && !event.shiftKey && event.key.toLowerCase() === "s") run(() => playbackRef.current.setShuffle((value) => !value));
-      else if (!editable && modifier && !event.shiftKey && event.key.toLowerCase() === "r") run(() => playbackRef.current.cycleRepeat());
+      else if (!editable && modifier && !event.shiftKey && event.key.toLowerCase() === "s") run(() => transportRef.current.setShuffle((value) => !value));
+      else if (!editable && modifier && !event.shiftKey && event.key.toLowerCase() === "r") run(() => transportRef.current.cycleRepeat());
       else if (!editable && modifier && event.key.toLowerCase() === "a" && actions.canSelectAll()) run(actions.selectAll);
       else if (!editable && (event.key === "Delete" || event.key === "Backspace") && actions.canRemoveSelection()) run(actions.removeSelection);
-      else if (!editable && modifier && event.key === "ArrowRight") run(() => playbackRef.current.next());
-      else if (!editable && modifier && event.key === "ArrowLeft") run(() => playbackRef.current.previous());
-      else if (!editable && event.shiftKey && !modifier && event.key === "ArrowRight") run(() => playbackRef.current.seek(playbackRef.current.positionNow() + 5));
-      else if (!editable && event.shiftKey && !modifier && event.key === "ArrowLeft") run(() => playbackRef.current.seek(Math.max(0, playbackRef.current.positionNow() - 5)));
-      else if (!editable && modifier && event.key === "ArrowUp") run(() => playbackRef.current.setVolume(playbackRef.current.volume + 0.05));
-      else if (!editable && modifier && event.key === "ArrowDown") run(() => playbackRef.current.setVolume(playbackRef.current.volume - 0.05));
-      else if (!editable && (event.key === "F11" || (event.ctrlKey && event.metaKey && event.key.toLowerCase() === "f"))) run(() => { if (playbackRef.current.current) setFullPlayer((value) => !value); });
+      else if (!editable && modifier && event.key === "ArrowRight") run(() => transportRef.current.next());
+      else if (!editable && modifier && event.key === "ArrowLeft") run(() => transportRef.current.previous());
+      else if (!editable && event.shiftKey && !modifier && event.key === "ArrowRight") run(() => transportRef.current.seek(transportRef.current.positionNow() + 5));
+      else if (!editable && event.shiftKey && !modifier && event.key === "ArrowLeft") run(() => transportRef.current.seek(Math.max(0, transportRef.current.positionNow() - 5)));
+      else if (!editable && modifier && event.key === "ArrowUp") run(() => transportRef.current.setVolume(transportRef.current.volume + 0.05));
+      else if (!editable && modifier && event.key === "ArrowDown") run(() => transportRef.current.setVolume(transportRef.current.volume - 0.05));
+      else if (!editable && (event.key === "F11" || (event.ctrlKey && event.metaKey && event.key.toLowerCase() === "f"))) run(() => { if (transportRef.current.current) setFullPlayer((value) => !value); });
       else if (!editable && event.key === "?") run(() => setShortcutsOpen((value) => !value));
       else if (event.key === "Escape") {
         if (accountOpen) setAccountOpen(false);
@@ -794,7 +858,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   useEffect(() => {
     let dispose: (() => void) | undefined;
     void listen<string>("menu-command", ({ payload }) => {
-      const controller = playbackRef.current;
+      const controller = transportRef.current;
       if (payload === "preferences") navigate({ kind: "settings" });
       else if (payload === "search") navigate({ kind: "search" });
       else if (payload === "playpause") void controller.toggle();
@@ -836,6 +900,30 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       else invite.declined.set(reply.deviceID, reply.reason ?? "declined");
       return;
     }
+    // A controller's own player is not the one these commands are meant for.
+    // Applying one here would act on a mirror with no audio behind it.
+    if (remoteRef.current && ["play", "pause", "toggle", "previous", "next", "seek", "setShuffle", "setRepeat",
+      "setVolume", "skipTo", "enqueue", "playNext"].includes(command.name)) return;
+    if (command.name === "setShuffle" && command.value !== undefined) return controller.setShuffle(command.value === 1);
+    if (command.name === "setRepeat" && command.value !== undefined) {
+      return controller.setRepeatMode(command.value === 2 ? "one" : command.value === 1 ? "all" : "off");
+    }
+    if (command.name === "setVolume" && command.value !== undefined) return controller.setVolume(command.value);
+    if (command.name === "skipTo" && command.queueItem) {
+      const { index, trackID } = command.queueItem;
+      const target = controller.queue[index]?.id === trackID ? index : controller.queue.findIndex((song) => song.id === trackID);
+      if (target >= 0) controller.skipTo(target);
+      return;
+    }
+    if ((command.name === "enqueue" || command.name === "playNext") && command.tracks) {
+      const songs = (await resolveSongs(command.tracks.trackIDs)).filter((song): song is SongSummary => Boolean(song));
+      const now = playbackRef.current;
+      if (command.name === "enqueue") songs.forEach((song) => now.enqueue(song));
+      // Each Play next goes straight after the current track, so the last one
+      // goes in first to keep the order the sender gave.
+      else [...songs].reverse().forEach((song) => now.playNext(song));
+      return;
+    }
     if (command.name === "play" && !controller.isPlaying) return void await controller.toggle();
     if (command.name === "pause" && controller.isPlaying) return void await controller.toggle();
     if (command.name === "toggle") return void await controller.toggle();
@@ -846,6 +934,9 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     // stops being a remote for anyone else — otherwise the bar would keep
     // claiming "Playing on <device>" over its own audio.
     if (command.name === "handoff" && command.handoff) {
+      if (remoteRef.current) logConnectEvent("remote_end", { peer: remoteRef.current.id, reason: "handoff received" });
+      remoteRef.current = undefined;
+      mirrorRows.current = undefined;
       setRemoteDevice(undefined);
       return void await applyHandoff(command.handoff);
     }
@@ -866,6 +957,8 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       // An output belongs to one session at a time.
       const existing = groupRef.current;
       if (existing && existing.id !== group.id) return decline("in another session");
+      remoteRef.current = undefined;
+      mirrorRows.current = undefined;
       setRemoteDevice(undefined);
       // Start where the leader's clock has reached by now, not where it was
       // when the frame left. iOS has always done this; the desktop used the
@@ -958,10 +1051,180 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       logConnectEvent("group_left", { session: command.group?.id ?? "unknown" });
       setGroupSession(undefined);
     }
-  }, [applyHandoff]);
+  }, [applyHandoff, resolveSongs]);
 
   const applyConnectCommandRef = useRef(applyConnectCommand);
   applyConnectCommandRef.current = applyConnectCommand;
+
+  /// Starts mirroring `peer`, the device that is playing. Nothing plays here:
+  /// the player shows that device's track, queue and clock, and every control
+  /// is sent to it. See "Following the active device" in WIRE-V1.md.
+  const beginFollow = useCallback((peer: ConnectPeer, trigger: string, snapshot?: ConnectSnapshot) => {
+    const previous = remoteRef.current;
+    if (previous?.id === peer.id) return;
+    logConnectEvent("remote_begin", {
+      peer: peer.id, peerName: peer.name, platform: peer.platform, trigger,
+      movedFrom: previous ? "another device" : "here",
+    });
+    const device = { id: peer.id, name: deviceName(peer), platform: peer.platform };
+    remoteRef.current = device;
+    setRemoteDevice(device);
+    mirrorRows.current = undefined;
+    queueApplying.current = undefined;
+    queueRequested.current = undefined;
+    renderedHere.current = false;
+    if (snapshot) mirrorPeerRef.current(peer, snapshot);
+  }, []);
+
+  /// Stops following. The mirrored queue stays loaded here, paused where the
+  /// device had reached, as Spotify leaves it.
+  const endFollow = useCallback((reason: string) => {
+    const followed = remoteRef.current;
+    if (!followed) return;
+    logConnectEvent("remote_end", { peer: followed.id, reason });
+    remoteRef.current = undefined;
+    setRemoteDevice(undefined);
+    mirrorRows.current = undefined;
+    queueApplying.current = undefined;
+    trackGuard.current = undefined;
+    const controller = playbackRef.current;
+    if (controller.isMirroring()) controller.endMirror({ play: false, position: controller.positionNow() });
+  }, []);
+
+  /// Shows the followed device's current track here, straight from its frame
+  /// so the bar changes with no server round trip, then with the full song
+  /// once it resolves.
+  const mirrorCurrentTrack = useCallback((peer: ConnectPeer) => {
+    const frame = peer.playback;
+    const id = frame.trackID;
+    if (!id) return;
+    const cached = songCache.current.get(id);
+    const song: SongSummary = cached ?? {
+      id, title: frame.title ?? "", artist: frame.artist ?? "", album: frame.album ?? "",
+      coverArt: frame.coverArtID, duration: frame.duration || undefined,
+    };
+    mirrorRows.current = undefined;
+    playbackRef.current.mirrorQueue([song], 0, frame.contextLabel ?? deviceName(peer));
+    if (cached) return;
+    const generation = ++mirrorGeneration.current;
+    void resolveSongs([id]).then(([resolved]) => {
+      const controller = playbackRef.current;
+      if (!resolved || generation !== mirrorGeneration.current || !controller.isMirroring() || controller.current?.id !== id) return;
+      controller.mirrorQueue(controller.queue.map((item) => item.id === id ? resolved : item), controller.index);
+    });
+  }, [resolveSongs]);
+
+  /// Replaces the mirrored queue with the one the device sent, current track
+  /// first, then the rest, leaving the current track alone if the device
+  /// has moved on while the songs resolved.
+  const applyPeerQueue = useCallback(async (peer: ConnectPeer, queue: ConnectQueue) => {
+    const key = `${peer.id}:${queue.revision}`;
+    if (queueApplying.current === key) return;
+    queueApplying.current = key;
+    const generation = ++mirrorGeneration.current;
+    const currentRow = queue.index - queue.offset;
+    const currentId = queue.trackIDs[currentRow];
+    if (currentId) await resolveSongs([currentId]);
+    const resolved = await resolveSongs(queue.trackIDs);
+    const controller = playbackRef.current;
+    if (generation !== mirrorGeneration.current || remoteRef.current?.id !== peer.id || !controller.isMirroring()) {
+      if (queueApplying.current === key) queueApplying.current = undefined;
+      return;
+    }
+    const songs: SongSummary[] = [];
+    const fullIndexes: number[] = [];
+    let index = -1;
+    resolved.forEach((song, row) => {
+      if (!song) return;
+      if (row === currentRow) index = songs.length;
+      songs.push(song);
+      fullIndexes.push(queue.offset + row);
+    });
+    const latest = snapshotRef.current?.peers.find((candidate) => candidate.id === peer.id)?.playback;
+    if (index < 0 || (latest?.trackID && songs[index].id !== latest.trackID)) {
+      queueApplying.current = undefined;
+      return;
+    }
+    mirrorRows.current = { peerId: peer.id, revision: queue.revision, fullIndexes };
+    controller.mirrorQueue(songs, index, queue.contextLabel ?? latest?.contextLabel ?? controller.contextLabel);
+  }, [resolveSongs]);
+
+  const requestPeerQueue = useCallback((peerId: string, revision: number) => {
+    const requested = queueRequested.current;
+    if (requested?.peerId === peerId && requested.revision === revision && Date.now() - requested.at < 3_000) return;
+    queueRequested.current = { peerId, revision, at: Date.now() };
+    void invoke("send_connect_command", { peerId, command: { name: "queueRequest" } }).catch(() => undefined);
+  }, []);
+
+  /// Brings the mirror up to date with one frame from the followed device.
+  const mirrorPeer = useCallback((peer: ConnectPeer, snapshot: ConnectSnapshot) => {
+    const controller = playbackRef.current;
+    const frame = peer.playback;
+    // A skip just sent, and the mirror already shows where it goes; this
+    // frame was written before the device moved. While the mirror still shows
+    // the old track, the frame changes nothing visible and is applied.
+    if (trackGuardIgnores(trackGuard.current, frame.trackID) && controller.current?.id !== frame.trackID) return;
+    trackGuard.current = undefined;
+    if (hasRemoteControl(frame) && frame.queueRevision !== undefined) {
+      const queue = snapshot.queues?.[peer.id];
+      if (queue && queue.revision === frame.queueRevision) {
+        const rows = mirrorRows.current;
+        if (rows?.peerId !== peer.id || rows.revision !== queue.revision) void applyPeerQueue(peer, queue);
+      } else {
+        requestPeerQueue(peer.id, frame.queueRevision);
+      }
+    }
+    if (frame.trackID && controller.current?.id !== frame.trackID) {
+      const rows = mirrorRows.current;
+      const row = rows?.peerId === peer.id && frame.queueIndex !== undefined ? rows.fullIndexes.indexOf(frame.queueIndex) : -1;
+      if (row >= 0 && controller.queue[row]?.id === frame.trackID) controller.mirrorQueue(controller.queue, row);
+      else mirrorCurrentTrack(peer);
+    }
+    if (!playbackRef.current.isMirroring()) return;
+    playbackRef.current.mirrorState({
+      isPlaying: frame.isPlaying,
+      position: projectedPeerPosition(frame, peer.updatedAt),
+      duration: frame.duration,
+      shuffle: frame.shuffle,
+      repeat: repeatFromWire(frame.repeatMode),
+      volume: frame.volume,
+    });
+  }, [applyPeerQueue, mirrorCurrentTrack, requestPeerQueue]);
+  const mirrorPeerRef = useRef(mirrorPeer);
+  mirrorPeerRef.current = mirrorPeer;
+
+  /// Applies the follow rules to one snapshot: start following the device
+  /// that is playing, switch, or let go, then mirror whatever is followed.
+  const followSnapshot = useCallback((snapshot: ConnectSnapshot) => {
+    if (!snapshot.isAvailable) return;
+    const now = Date.now() / 1000;
+    peerActivity.current = notePeerActivity(peerActivity.current, snapshot.peers, now);
+    if (droppedPeer.current && now >= droppedPeer.current.until) droppedPeer.current = undefined;
+    const controller = playbackRef.current;
+    const decision = decideFollow({
+      deviceID: snapshot.localDeviceId,
+      rendering: controller.rendering,
+      hasTrack: Boolean(controller.current),
+      inSession: Boolean(groupRef.current),
+      stoppedAt: localStoppedAt.current,
+      followingID: remoteRef.current?.id,
+    }, followPeers(snapshot.peers, peerActivity.current), droppedPeer.current, now);
+    if (decision.action === "detach") {
+      const followed = remoteRef.current;
+      if (decision.reason === "peer left the network" && followed) {
+        droppedPeer.current = { id: followed.id, until: now + DROP_COOLDOWN_SECONDS };
+        setToast(`${followed.name} is no longer on this network`);
+      }
+      endFollow(decision.reason);
+    } else if (decision.action === "follow") {
+      const peer = snapshot.peers.find((candidate) => candidate.id === decision.peerID);
+      if (peer) beginFollow(peer, remoteRef.current ? "switched" : "adopted");
+    }
+    const followed = remoteRef.current && snapshot.peers.find((peer) => peer.id === remoteRef.current?.id);
+    if (followed) mirrorPeer(followed, snapshot);
+  }, [beginFollow, endFollow, mirrorPeer]);
+  const followSnapshotRef = useRef(followSnapshot);
+  followSnapshotRef.current = followSnapshot;
 
   useEffect(() => {
     let active = true;
@@ -987,7 +1250,9 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
         // this shape silently and reported Connect as unavailable instead.
         if (!snapshot || !Array.isArray(snapshot.peers)) return;
         clockOffsets.current = snapshot.clockOffsets ?? {};
+        snapshotRef.current = snapshot;
         setConnectState({ ...snapshot, commands: [] });
+        followSnapshotRef.current(snapshot);
         for (const command of snapshot.commands ?? []) {
           if (!active) break;
           try {
@@ -1005,78 +1270,101 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     }
     void poll();
     const interval = window.setInterval(poll, 1000);
-    // The reader thread knows the moment a command frame lands. Waiting for the
-    // next tick cost every remote action up to a second before it was even
-    // seen; the snapshot drain stays the delivery path so nothing is lost.
-    let disposeEvent: (() => void) | undefined;
-    void listen("connect-commands-pending", () => void poll())
-      .then((unlisten) => { if (active) disposeEvent = unlisten; else unlisten(); })
-      .catch(() => undefined);
-    return () => { active = false; window.clearInterval(interval); disposeEvent?.(); };
+    // The reader thread knows the moment a command frame lands, or a peer's
+    // frame changes what this computer shows. Waiting for the next tick cost
+    // up to a second each time; the snapshot stays the delivery path so
+    // nothing is lost.
+    const disposers: Array<() => void> = [];
+    for (const event of ["connect-commands-pending", "connect-peers-changed"]) {
+      void listen(event, () => void poll())
+        .then((unlisten) => { if (active) disposers.push(unlisten); else unlisten(); })
+        .catch(() => undefined);
+    }
+    return () => { active = false; window.clearInterval(interval); disposers.forEach((dispose) => dispose()); };
   }, []);
 
+  /// Bumped whenever the queue this computer plays from changes, as
+  /// `queueRevision` on the wire, so a follower knows to fetch it again.
+  const queueRevision = useRef(0);
+  const lastPublished = useRef({ position: 0, at: 0, playing: false });
+  const publish = useCallback(() => {
+    const controller = playbackRef.current;
+    const session = groupRef.current;
+    const following = remoteRef.current;
+    const position = controller.positionNow();
+    lastPublished.current = { position, at: Date.now(), playing: controller.rendering };
+    void invoke("publish_connect_playback", {
+      // While following, this computer plays nothing and says so. Publishing
+      // the mirror would have it look like a second device playing the
+      // same song.
+      playback: following ? { isPlaying: false, position: 0, duration: 0 } : {
+        trackID: controller.current?.id, title: controller.current?.title, artist: controller.current?.artist,
+        album: controller.current?.album, coverArtID: controller.current?.coverArt, isPlaying: controller.rendering,
+        position, duration: controller.duration,
+        shuffle: controller.shuffle, repeatMode: controller.repeat, volume: controller.volume,
+        queueRevision: queueRevision.current,
+        queueIndex: controller.current ? controller.index : undefined,
+        queueLength: controller.queue.length,
+        contextLabel: controller.current ? controller.contextLabel : undefined,
+      },
+      // Published so another device can see, before it tries to take this
+      // one, that it is already rendering a session or already driving a
+      // third device.
+      commitment: {
+        sessionID: session?.id,
+        leaderID: session?.leaderID,
+        revision: groupRevision.current,
+        controllingPeerID: following?.id,
+      },
+    }).catch(() => undefined);
+  }, []);
+
+  /// A change another device should see goes out within about 120 ms, several
+  /// changes in that window as one frame. The two-second interval below and
+  /// the transport's three-second heartbeat cover everything else.
+  const publishTimer = useRef<number | undefined>(undefined);
+  const requestPublish = useCallback(() => {
+    if (publishTimer.current !== undefined) return;
+    publishTimer.current = window.setTimeout(() => {
+      publishTimer.current = undefined;
+      publish();
+    }, 120);
+  }, [publish]);
+
   useEffect(() => {
-    function publish() {
-      const controller = playbackRef.current;
-      const session = groupRef.current;
-      void invoke("publish_connect_playback", {
-        playback: {
-          trackID: controller.current?.id, title: controller.current?.title, artist: controller.current?.artist,
-          album: controller.current?.album, coverArtID: controller.current?.coverArt, isPlaying: controller.isPlaying,
-          position: controller.positionNow(), duration: controller.duration,
-        },
-        // Published so another device can see, before it tries to take this
-        // one, that it is already rendering a session or already driving a
-        // third device.
-        commitment: {
-          sessionID: session?.id,
-          leaderID: session?.leaderID,
-          revision: groupRevision.current,
-          controllingPeerID: remoteRef.current?.id,
-        },
-      }).catch(() => undefined);
-    }
     publish();
     const interval = window.setInterval(publish, 2000);
-    return () => window.clearInterval(interval);
-  }, []);
+    return () => { window.clearInterval(interval); if (publishTimer.current !== undefined) window.clearTimeout(publishTimer.current); };
+  }, [publish]);
 
-  /// What the player bar and expanded player actually drive.
-  ///
-  /// While this device is a remote, the transport sends absolute commands to
-  /// the peer and the play state comes from the peer's published clock, but the
-  /// track identity stays local — it is the same queue, deliberately held here
-  /// in step. Everything that must keep touching real local audio (the Connect
-  /// publish loop, the group leader clock) uses `playbackRef` and is unaffected.
-  const remotePeer = remoteDevice ? connectState.peers.find((peer) => peer.id === remoteDevice.id) : undefined;
-  const transport = useMemo(() => {
-    if (!remoteDevice) return playback;
-    const send = (command: ConnectCommand) => {
-      void invoke("send_connect_command", { peerId: remoteDevice.id, command })
-        .catch(() => setPageError(`Splynt could not reach ${remoteDevice.name}.`));
-    };
-    return {
-      ...playback,
-      isPlaying: remotePeer?.playback.isPlaying ?? false,
-      position: remotePeer?.playback.position ?? playback.position,
-      duration: remotePeer?.playback.duration || playback.duration,
-      toggle: async () => send({ name: "toggle" }),
-      next: () => send({ name: "next" }),
-      previous: () => send({ name: "previous" }),
-      seek: (value: number) => send({ name: "seek", value }),
-    };
-  }, [playback, remoteDevice, remotePeer]);
-
-  /// A device that has gone quiet on the network cannot be driven any more.
-  /// The Rust side already waits twelve seconds before expiring a peer, so
-  /// this does not fire on a momentary gap.
   useEffect(() => {
-    if (!remoteDevice || !connectState.isAvailable) return;
-    if (connectState.peers.some((peer) => peer.id === remoteDevice.id)) return;
-    logConnectEvent("remote_end", { peer: remoteRef.current?.id ?? "unknown", reason: "peer left the network" });
-    setRemoteDevice(undefined);
-    setToast(`${remoteDevice.name} is no longer on this network`);
-  }, [connectState.isAvailable, connectState.peers, remoteDevice]);
+    requestPublish();
+  }, [playback.current?.id, playback.rendering, playback.shuffle, playback.repeat, playback.volume, remoteDevice?.id, groupSession?.id, requestPublish]);
+
+  // A seek here moves the clock in a way the last frame cannot predict.
+  useEffect(() => {
+    const last = lastPublished.current;
+    const expected = last.playing ? last.position + (Date.now() - last.at) / 1000 : last.position;
+    if (!remoteRef.current && Math.abs(playbackRef.current.positionNow() - expected) > 1.5) requestPublish();
+  }, [playback.position, requestPublish]);
+
+  useEffect(() => {
+    const controller = playbackRef.current;
+    if (controller.isMirroring() || !controller.current) {
+      void invoke("publish_connect_queue", { queue: null }).catch(() => undefined);
+      return;
+    }
+    queueRevision.current += 1;
+    void invoke("publish_connect_queue", {
+      queue: {
+        revision: queueRevision.current,
+        index: controller.index,
+        trackIDs: controller.queue.map((song) => song.id),
+        contextLabel: controller.contextLabel,
+      },
+    }).catch(() => undefined);
+    requestPublish();
+  }, [playback.queue, playback.index, playback.mirroring, playback.contextLabel, requestPublish]);
 
   async function sendRemote(peerId: string, command: ConnectCommand) {
     try { await invoke("send_connect_command", { peerId, command }); }
@@ -1174,8 +1462,18 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     if (!songs.length) return;
     const safeIndex = Math.max(0, Math.min(index, songs.length - 1));
     const remote = remoteRef.current;
-    playbackRef.current.playQueue(songs, safeIndex, !remote, position, label);
-    if (!remote) return;
+    if (!remote) {
+      playbackRef.current.playQueue(songs, safeIndex, true, position, label);
+      return;
+    }
+    // Shown here at once, as the queue the device is about to play. Frames it
+    // writes before it gets there still name the old track and are ignored.
+    const controller = playbackRef.current;
+    trackGuard.current = { oldTrackID: controller.current?.id, until: Date.now() + TRACK_GUARD_MS };
+    for (const song of songs) songCache.current.set(song.id, song);
+    mirrorRows.current = undefined;
+    controller.mirrorQueue(songs, safeIndex, label);
+    controller.mirrorState({ isPlaying: true, position, duration: songs[safeIndex].duration ?? 0 });
     void invoke("send_connect_command", {
       peerId: remote.id,
       command: { name: "handoff", handoff: {
@@ -1188,11 +1486,135 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     setToast(`Playing on ${remote.name}`);
   }, []);
 
+  const remoteControls = Boolean(remoteDevice && connectState.peers.some((peer) => peer.id === remoteDevice.id && hasRemoteControl(peer.playback)));
+  const remoteControlsRef = useRef(remoteControls);
+  remoteControlsRef.current = remoteControls;
+
+  /// Add to queue, here or on the followed device. A v1 device cannot be
+  /// told to, so it says so rather than adding the songs here instead.
+  const enqueueSongs = useCallback((songs: SongSummary[], next = false) => {
+    if (!songs.length) return;
+    const remote = remoteRef.current;
+    const count = songs.length > 1 ? `${songs.length} songs` : undefined;
+    if (remote) {
+      if (!remoteControlsRef.current) {
+        setToast(`Update Splynt on ${remote.name} to change its queue from here`);
+        return;
+      }
+      for (const song of songs) songCache.current.set(song.id, song);
+      void invoke("send_connect_command", {
+        peerId: remote.id,
+        command: { name: next ? "playNext" : "enqueue", tracks: { trackIDs: songs.slice(0, 1000).map((song) => song.id) } },
+      }).catch(() => setPageError(`Splynt could not reach ${remote.name}.`));
+      setToast(next ? `${count ?? "Song"} playing next on ${remote.name}` : `${count ? `${count} added` : "Added"} to the queue on ${remote.name}`);
+      return;
+    }
+    const controller = playbackRef.current;
+    if (next) [...songs].reverse().forEach((song) => controller.playNext(song));
+    else songs.forEach((song) => controller.enqueue(song));
+    setToast(next ? (count ? `${count} playing next` : "Playing next") : (count ? `${count.replace(" songs", "")} added to queue` : "Added to queue"));
+  }, []);
+
   const playCollection = useCallback((songs: SongSummary[], label: string) => {
     if (!songs.length) return;
     const start = playbackRef.current.shuffle ? Math.floor(Math.random() * songs.length) : 0;
     startPlayback(songs, start, label);
   }, [startPlayback]);
+
+  /// Volume drags produce dozens of values a second. The followed device gets
+  /// one every 120 ms, and always the last one.
+  const volumeSend = useRef<{ timer?: number; value?: number }>({});
+
+  /// What the player bar, panels, expanded player, keyboard and media keys
+  /// drive. Locally that is the player itself. While following, the player
+  /// mirrors the followed device, so everything reads the right track and
+  /// state already, and this routes every control to that device instead.
+  const transport = useMemo(() => {
+    if (!remoteDevice) return playback;
+    const device = remoteDevice;
+    const send = (command: ConnectCommand) => {
+      void invoke("send_connect_command", { peerId: device.id, command })
+        .catch(() => setPageError(`Splynt could not reach ${device.name}.`));
+    };
+    const guardTrack = () => {
+      trackGuard.current = { oldTrackID: playbackRef.current.current?.id, until: Date.now() + TRACK_GUARD_MS };
+    };
+    return {
+      ...playback,
+      remote: { ...device, controls: remoteControls },
+      toggle: async () => {
+        const playing = playbackRef.current.isPlaying;
+        send({ name: playing ? "pause" : "play" });
+        playbackRef.current.mirrorState({ isPlaying: !playing });
+      },
+      next: () => { guardTrack(); send({ name: "next" }); },
+      // Previous a few seconds in restarts the same track on every Splynt
+      // player, and frames for that track are then the new state.
+      previous: () => { if (playbackRef.current.positionNow() <= 4) guardTrack(); send({ name: "previous" }); },
+      seek: (value: number) => { send({ name: "seek", value }); playbackRef.current.mirrorState({ position: value }); },
+      setShuffle: (value: boolean | ((current: boolean) => boolean)) => {
+        if (!remoteControls) return;
+        const next = typeof value === "function" ? value(playbackRef.current.shuffle) : value;
+        send({ name: "setShuffle", value: next ? 1 : 0 });
+        playbackRef.current.mirrorState({ shuffle: next });
+      },
+      cycleRepeat: () => {
+        if (!remoteControls) return;
+        const now = playbackRef.current.repeat;
+        const next = now === "off" ? "all" : now === "all" ? "one" : "off";
+        send({ name: "setRepeat", value: repeatToWire(next) });
+        playbackRef.current.mirrorState({ repeat: next });
+      },
+      setVolume: (value: number) => {
+        if (!remoteControls) return;
+        const safe = Math.max(0, Math.min(1, value));
+        playbackRef.current.mirrorState({ volume: safe });
+        const pending = volumeSend.current;
+        pending.value = safe;
+        if (pending.timer !== undefined) return;
+        send({ name: "setVolume", value: safe });
+        pending.timer = window.setTimeout(() => {
+          pending.timer = undefined;
+          if (pending.value !== safe) send({ name: "setVolume", value: pending.value });
+        }, 120);
+      },
+      skipTo: (row: number) => {
+        const song = playbackRef.current.queue[row];
+        if (!song) return;
+        const rows = mirrorRows.current;
+        if (!remoteControls || rows?.peerId !== device.id) {
+          // A v1 device cannot jump within its queue; sending it the queue
+          // from this row is the one way to get there.
+          startPlayback(playbackRef.current.queue, row, playbackRef.current.contextLabel);
+          return;
+        }
+        guardTrack();
+        send({ name: "skipTo", queueItem: { index: rows.fullIndexes[row] ?? row, trackID: song.id } });
+        playbackRef.current.mirrorQueue(playbackRef.current.queue, row);
+        playbackRef.current.mirrorState({ position: 0 });
+      },
+      playQueue: (songs: SongSummary[], startIndex = 0, _autoplay = true, startPosition = 0, label = "Queue") =>
+        startPlayback(songs, startIndex, label, startPosition),
+      enqueue: (song: SongSummary) => enqueueSongs([song]),
+      playNext: (song: SongSummary) => enqueueSongs([song], true),
+      // No wire command removes or reorders another device's queue.
+      removeQueueItem: () => undefined,
+      moveQueueItem: () => undefined,
+      clearUpcoming: () => undefined,
+      clearManualQueue: () => undefined,
+      undoQueueMutation: () => undefined,
+    };
+  }, [enqueueSongs, playback, remoteControls, remoteDevice, startPlayback]);
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
+  mirrorAction.current = (action, value) => {
+    const controls = transportRef.current;
+    if (action === "play" && !controls.isPlaying) void controls.toggle();
+    else if (action === "pause" && controls.isPlaying) void controls.toggle();
+    else if (action === "next") controls.next();
+    else if (action === "previous") controls.previous();
+    else if (action === "seek" && value !== undefined) controls.seek(value);
+  };
 
   async function downloadCollection(songs: SongSummary[]) {
     setToast(`Downloading ${songs.length} ${songs.length === 1 ? "track" : "tracks"}…`);
@@ -1315,7 +1737,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
       const songs = await collectionSongs(menu);
       if (!songs.length) { setToast("That collection has no songs."); return; }
       if (action === "play") playCollection(songs, menu.name);
-      else if (action === "enqueue") { songs.forEach((song) => playback.enqueue(song)); setToast(`${songs.length} added to queue`); }
+      else if (action === "enqueue") enqueueSongs(songs);
       else await downloadCollection(songs);
     } catch (reason) { setPageError(reasonMessage(reason, "That collection could not be opened.")); }
   }
@@ -1387,39 +1809,96 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   }
 
   async function movePlaybackTo(peer: ConnectPeer) {
-    if (!playback.current || !playback.queue.length) return;
+    const controller = playbackRef.current;
+    if (!controller.current || !controller.queue.length) return;
+    const position = controller.positionNow();
+    const wasPlaying = controller.isPlaying;
     // A transferred queue is capped at 1,000 entries (`docs/connect/WIRE-V1.md`).
     // The other transfer sites already sliced; these two sent the whole queue,
     // and a receiver that enforces the cap refuses the frame outright rather
     // than truncating it, so a long queue moved nothing at all.
-    await sendRemote(peer.id, { name: "handoff", handoff: { trackIDs: playback.queue.slice(0, 1000).map((song) => song.id), currentTrackID: playback.current.id, position: playback.positionNow(), isPlaying: playback.isPlaying } });
+    await sendRemote(peer.id, { name: "handoff", handoff: { trackIDs: controller.queue.slice(0, 1000).map((song) => song.id), currentTrackID: controller.current.id, position, isPlaying: wasPlaying } });
     // Moving between devices has to stop the first one; the handoff only ever
     // starts the new one, so without this both would be playing.
     const previous = remoteRef.current;
     if (previous && previous.id !== peer.id) await sendRemote(previous.id, { name: "pause" });
-    if (playback.isPlaying) await playback.toggle();
-    // The local queue stays loaded and paused, so this device becomes a remote
-    // for that peer rather than simply going quiet.
-    logConnectEvent("remote_begin", { peer: peer.id, peerName: peer.name, platform: peer.platform, trigger: "chosen", movedFrom: previous?.id ? "another device" : "here" });
-    setRemoteDevice({ id: peer.id, name: peer.name });
-    setToast(`Playing on ${peer.name}`);
+    // The same queue, now as a mirror of the device it moved to. Its frames
+    // from before the handoff still name what it was playing then.
+    trackGuard.current = { oldTrackID: peer.playback.trackID, until: Date.now() + TRACK_GUARD_MS };
+    if (previous) endFollow("changed output");
+    controller.mirrorQueue(controller.queue, controller.index, controller.contextLabel);
+    controller.mirrorState({ isPlaying: wasPlaying, position, duration: controller.duration });
+    beginFollow(peer, "chosen");
+    setToast(`Playing on ${deviceName(peer)}`);
+  }
+
+  /// Picking this computer while following: the same queue, track and
+  /// position continue here, and the device that was playing pauses. The
+  /// pause goes first, so that device sees this computer start after it
+  /// stopped and follows it, rather than the other way round.
+  async function takePlaybackHere() {
+    const followed = remoteRef.current;
+    const controller = playbackRef.current;
+    if (!followed) return;
+    const play = controller.isPlaying;
+    const position = controller.positionNow();
+    // The device that was playing until now no longer takes this computer
+    // back the moment its last frame arrives.
+    localStoppedAt.current = Date.now() / 1000;
+    await sendRemote(followed.id, { name: "pause" });
+    logConnectEvent("remote_end", { peer: followed.id, reason: "played here" });
+    remoteRef.current = undefined;
+    setRemoteDevice(undefined);
+    mirrorRows.current = undefined;
+    trackGuard.current = undefined;
+    if (controller.isMirroring()) controller.endMirror({ play, position });
+  }
+
+  /// The queue a peer holds, asked for and resolved, or undefined if it does
+  /// not answer within a second and a half. A v1 peer never will.
+  async function fetchPeerQueue(peer: ConnectPeer) {
+    if (!hasRemoteControl(peer.playback) || peer.playback.queueRevision === undefined) return undefined;
+    const revision = peer.playback.queueRevision;
+    let queue = snapshotRef.current?.queues?.[peer.id];
+    if (queue?.revision !== revision) {
+      requestPeerQueue(peer.id, revision);
+      const deadline = Date.now() + 1_500;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+        queue = snapshotRef.current?.queues?.[peer.id];
+        if (queue?.revision === revision) break;
+      }
+      if (queue?.revision !== revision) return undefined;
+    }
+    const resolved = await resolveSongs(queue.trackIDs);
+    const songs: SongSummary[] = [];
+    let index = -1;
+    resolved.forEach((song, row) => {
+      if (!song) return;
+      if (row === queue.index - queue.offset) index = songs.length;
+      songs.push(song);
+    });
+    return index < 0 ? undefined : { songs, index, label: queue.contextLabel };
   }
 
   async function playPeerHere(peer: ConnectPeer) {
+    if (remoteRef.current?.id === peer.id && playbackRef.current.isMirroring()) return void await takePlaybackHere();
     if (!peer.playback.trackID) return;
     // Taking the audio back ends remote control, whichever device it was for —
     // including a third device that was playing until now.
     const previous = remoteRef.current;
     if (previous && previous.id !== peer.id) void sendRemote(previous.id, { name: "pause" });
-    if (previous) logConnectEvent("remote_end", { peer: previous.id, reason: "played here" });
-    setRemoteDevice(undefined);
+    if (previous) endFollow("played here");
     try {
-      const songs = await invoke<SongSummary[]>("get_songs_by_ids", { ids: [peer.playback.trackID] });
+      // The whole queue when the device can send it; a v1 device's frames
+      // carry only the current track.
+      const whole = await fetchPeerQueue(peer);
+      const songs = whole?.songs ?? await invoke<SongSummary[]>("get_songs_by_ids", { ids: [peer.playback.trackID] });
       if (!songs?.length) throw new Error(`${peer.name} is playing something this server could not resolve.`);
-      // Still a one-track queue: peer state carries only the current track, so
-      // recovering the rest of what that device holds needs a new message.
-      playback.playQueue(songs, 0, peer.playback.isPlaying, peer.playback.position, peer.name);
+      localStoppedAt.current = Date.now() / 1000;
       await sendRemote(peer.id, { name: "pause" });
+      playbackRef.current.playQueue(songs, whole?.index ?? 0, peer.playback.isPlaying,
+        projectedPeerPosition(peer.playback, peer.updatedAt), whole?.label ?? deviceName(peer));
     } catch (reason) { setPageError(reasonMessage(reason, "That track is not available on this server.")); }
   }
 
@@ -1690,7 +2169,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
     else navigate({ kind: "artist", id });
   };
   const startRadio = (song: SongSummary) => navigate({ kind: "radio", id: song.id, title: `${song.title} Radio` });
-  const toggleShuffle = () => playback.setShuffle((value) => !value);
+  const toggleShuffle = () => transport.setShuffle((value) => !value);
   const detailTitle = detail ? ("name" in detail ? detail.name : "title" in detail ? detail.title : undefined) : undefined;
   const routeTitle = route.kind === "home" ? "Home" : route.kind === "search" ? "Search" : route.kind === "library" ? "Your Library" : route.kind === "liked" ? "Liked Songs" : route.kind === "downloads" ? "Downloads" : route.kind === "profile" ? "Profile" : route.kind === "settings" ? "Settings" : route.kind === "history" ? "Listening History" : route.kind === "stats" ? "Stats" : route.kind === "radio" ? route.title : "Splynt";
   const visiblePlaylists = settings.hideExternalPlaylists
@@ -1833,7 +2312,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   };
   const collectionControls = {
     compactHeader: headerCompact,
-    onTogglePlayback: () => void playback.toggle(),
+    onTogglePlayback: () => void transport.toggle(),
     onToggleShuffle: toggleShuffle,
     shuffleArmed: playback.shuffle,
   };
@@ -1857,7 +2336,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
   };
 
   return (
-    <div className={`desktop-shell${panelMode ? " desktop-shell--panel" : ""}${fullPlayer ? " desktop-shell--expanded" : ""}${compactSidebar ? " desktop-shell--compact-sidebar" : ""}`} style={{ "--sidebar-width": `${sidebarWidth}px`, "--context-width": `${contextWidth}px` } as CSSProperties}>
+    <div className={`desktop-shell${panelMode ? " desktop-shell--panel" : ""}${fullPlayer ? " desktop-shell--expanded" : ""}${compactSidebar ? " desktop-shell--compact-sidebar" : ""}${remoteDevice ? " desktop-shell--remote" : ""}`} style={{ "--sidebar-width": `${sidebarWidth}px`, "--context-width": `${contextWidth}px` } as CSSProperties}>
       <header className="global-bar" data-tauri-drag-region>
         <div className="global-bar__leading" data-tauri-drag-region>
           <Brand compact />
@@ -2005,7 +2484,7 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
         </div>
       </main>
 
-      {panelMode && <DesktopContextPanel artist={currentArtist} artistFollowed={currentArtistFollowed} connect={connectState} groupId={groupSession?.id} liked={currentLiked} mode={panelMode} onClose={() => setPanelMode(undefined)} onMoveHere={playPeerHere} onMoveToDevice={movePlaybackTo} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onOpenQueue={() => openPanel("queue")} onResize={beginContextResize} onResizeKey={resizeContextWithKeyboard} onSaveQueue={() => setSaveQueueOpen(true)} onSend={sendRemote} onStartGroup={startGroup} onStopGroup={stopGroup} onToggleFollow={() => playback.current?.artistId && void setCollectionStarred("artist", playback.current.artistId, !currentArtistFollowed, currentArtist)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} autoplay={autoplay} playback={playback} recentlyPlayed={recentlyPlayed} remoteDeviceId={remoteDevice?.id} width={contextWidth} />}
+      {panelMode && <DesktopContextPanel artist={currentArtist} artistFollowed={currentArtistFollowed} autoplay={autoplay} connect={connectState} groupId={groupSession?.id} liked={currentLiked} mode={panelMode} onClose={() => setPanelMode(undefined)} onMoveHere={playPeerHere} onMoveToDevice={movePlaybackTo} onPlayHere={() => void takePlaybackHere()} onOpenAlbum={openAlbumById} onOpenArtist={openArtistById} onOpenQueue={() => openPanel("queue")} onResize={beginContextResize} onResizeKey={resizeContextWithKeyboard} onSaveQueue={() => setSaveQueueOpen(true)} onSend={sendRemote} onStartGroup={startGroup} onStopGroup={stopGroup} onToggleFollow={() => playback.current?.artistId && void setCollectionStarred("artist", playback.current.artistId, !currentArtistFollowed, currentArtist)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} playback={transport} recentlyPlayed={recentlyPlayed} remoteDeviceId={remoteDevice?.id} width={contextWidth} />}
       <PlayerBar expanded={fullPlayer} liked={currentLiked} lyricsOpen={fullPlayer && fullPlayerSurface === "lyrics"} onOpenDevices={() => openPanel("connect")} remoteDevice={remoteDevice} onOpenAlbum={(id) => { setFullPlayer(false); openAlbumById(id); }} onOpenArtist={(id) => { setFullPlayer(false); openArtistById(id); }} onOpenPanel={openPanel} onToggleExpanded={() => setFullPlayer((value) => !value)} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} onStartRadio={startRadioAfterFailure} onToggleLyrics={toggleLyrics} panelMode={panelMode} playback={transport} />
       {fullPlayer && <FullPlayer onSurface={setFullPlayerSurface} onToggleWindowFullscreen={toggleWindowFullscreen} surface={fullPlayerSurface} windowFullscreen={windowFullscreen} liked={currentLiked} lyrics={lyrics} lyricsAutoScroll={settings.lyricsAutoScroll} lyricsLoading={lyricsLoading} lyricsTextSize={settings.lyricsTextSize} onClose={() => setFullPlayer(false)} onOpenAlbum={(id) => { setFullPlayer(false); openAlbumById(id); }} onOpenArtist={(id) => { setFullPlayer(false); openArtistById(id); }} onOpenPanel={openPanel} onToggleLike={() => playback.current && void toggleSongStar({ ...playback.current, starred: currentLiked ? new Date().toISOString() : undefined })} playback={transport} />}
       {trackMenu && (() => {
@@ -2019,10 +2498,10 @@ export function AuthenticatedShell({ library, onConnectionRestored, onSignedOut 
           onCreatePlaylist={() => { setPendingPlaylistSongs(targets); setCreatePlaylistOpen(true); }}
           playlists={visiblePlaylists.filter((playlist) => !playlist.owner || playlist.owner === library.server.username)}
           onDownload={() => targets.length > 1 ? void downloadCollection(targets) : void downloadSong(trackMenu.song)}
-          onEnqueue={() => { targets.forEach((song) => playback.enqueue(song)); setToast(targets.length > 1 ? `${targets.length} added to queue` : "Added to queue"); }}
+          onEnqueue={() => enqueueSongs(targets)}
           onOpenAlbum={trackMenu.song.albumId ? () => openAlbumById(trackMenu.song.albumId!) : undefined}
           onOpenArtist={trackMenu.song.artistId ? () => openArtistById(trackMenu.song.artistId!) : undefined}
-          onPlayNext={() => { [...targets].reverse().forEach((song) => playback.playNext(song)); setToast(targets.length > 1 ? `${targets.length} playing next` : "Playing next"); }}
+          onPlayNext={() => enqueueSongs(targets, true)}
           onRadio={() => startRadio(trackMenu.song)}
           onRemoveDownload={() => targets.length > 1 ? void removeCollection(targets) : void removeDownloadedSong(trackMenu.song)}
           onRemoveFromPlaylist={ownsCurrentPlaylist ? () => targets.length === 1 ? void removeFromCurrentPlaylist(trackMenu.index) : void removeSelectionFromPlaylist() : undefined}
