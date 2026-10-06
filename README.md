@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <sub>Splynt is an independent project. It isn't affiliated with or endorsed by Spotify.</sub>
+</p>
+
+<p align="center">
   <a href="https://testflight.apple.com/join/UWvEDqQc"><strong>Join the iPhone beta</strong></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/elijahgronda/Splynt/releases/latest"><strong>Download for Windows or Linux</strong></a>
