@@ -37,12 +37,27 @@
 
 ---
 
-Splynt is a Navidrome client that has a very familiar UI. There are currently 2 main builds, one for iOS and one for Desktop.
+Splynt is a Navidrome client that has a very familiar UI. There are 3 builds
+right now: one for iPhone, one for desktop, and one that runs in a terminal.
 
 I've been using it as my main player for a while now, so it's pretty polished.
 I put out updates pretty often though, so there are still a lot of things I'm
 ironing out. If you run into anything, let me know in the
 [Discord](https://discord.gg/kkaZfRpsm).
+
+## Get Splynt
+
+| Device | How |
+| --- | --- |
+| iPhone | Beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc). An App Store release is planned! |
+| Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
+| Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
+| macOS | [Test builds](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml) or [build it from source](SplyntDesktop/README.md#building-on-a-mac) |
+| Terminal | [Build it with Rust](SplyntCLI/README.md#install), then just type `splynt` |
+| Apple TV and Apple Watch | in progress |
+
+The Windows installers aren't signed yet, so Windows might warn you the first time
+you open one. Hit **More info**, then **Run anyway**.
 
 ## Features
 
@@ -68,21 +83,15 @@ ironing out. If you run into anything, let me know in the
 There's also offline downloads, play counts, a sleep timer, the audio format on
 every track, and you can save your queue as a playlist.
 
-## Get Splynt
+## The apps
 
-| Device | How |
-| --- | --- |
-| iPhone | Beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc). An App Store release is planned! |
-| Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
-| Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
-| macOS | [Test builds](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml) or [build it from source](SplyntDesktop/README.md#building-on-a-mac) |
-| Terminal | [Build it with Rust](SplyntCLI/README.md#install), then just type `splynt` |
-| Apple TV and Apple Watch | in progress |
+### iPhone
 
-The Windows installers aren't signed yet, so Windows might warn you the first time
-you open one. Hit **More info**, then **Run anyway**.
+The iPhone app has the most stuff in it, and it's in beta on
+[TestFlight](https://testflight.apple.com/join/UWvEDqQc) right now. It has
+everything in the list above. Apple TV and Apple Watch are in progress.
 
-## Desktop
+### Desktop
 
 The desktop app is free and open source, and all of its code is right here.
 It's built to work like Spotify on desktop: your library on the left, Home and
@@ -94,7 +103,7 @@ computers.
 It's made with Tauri 2, React and Rust. If you want to build it yourself, the
 steps are in [SplyntDesktop/README.md](SplyntDesktop/README.md).
 
-## Terminal
+### Terminal
 
 There's a terminal version too! It has a sidebar, cover art right in the
 terminal, search as you type, gapless and crossfade, the equalizer, a
@@ -122,8 +131,8 @@ bug, sending your log helps a ton:
 
 ## License
 
-The desktop app and the terminal app are [GPL-3.0 or later](LICENSE). Use it, change it, share it!
-If you share a modified version, it has to stay GPL with the source available.
+The desktop app and the terminal app are [GPL-3.0 or later](LICENSE). Use
+them, change them, share them! If you share a modified version, it has to stay GPL with the source available.
 
 The iPhone, Apple TV and Apple Watch apps are separate and closed source, so
 they're not in here and this license doesn't cover them.
