@@ -43,10 +43,12 @@ jobs:
           # test artifacts and default to Windows.
           REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'release' }}
         run: |
-          windows='{"name":"Windows x64","platform":"windows-latest","rustTargets":"","args":"--bundles nsis,msi"}'
-          linux='{"name":"Linux x64","platform":"ubuntu-22.04","rustTargets":"","args":"--bundles appimage,deb"}'
-          mac_arm='{"name":"macOS Apple Silicon test","platform":"macos-15","rustTargets":"aarch64-apple-darwin","args":"--bundles app,dmg --target aarch64-apple-darwin"}'
-          mac_intel='{"name":"macOS Intel test","platform":"macos-15-intel","rustTargets":"x86_64-apple-darwin","args":"--bundles app,dmg --target x86_64-apple-darwin"}'
+          # One installer per platform, with a name that never changes, so
+          # releases/latest/download/Splynt-Windows.exe always works.
+          windows='{"name":"Windows x64","platform":"windows-latest","rustTargets":"","args":"--bundles nsis","asset":"Splynt-Windows[ext]"}'
+          linux='{"name":"Linux x64","platform":"ubuntu-22.04","rustTargets":"","args":"--bundles appimage,deb","asset":"Splynt-Linux[ext]"}'
+          mac_arm='{"name":"macOS Apple Silicon test","platform":"macos-15","rustTargets":"aarch64-apple-darwin","args":"--bundles dmg --target aarch64-apple-darwin","asset":"Splynt-Mac-Apple-Silicon[ext]"}'
+          mac_intel='{"name":"macOS Intel test","platform":"macos-15-intel","rustTargets":"x86_64-apple-darwin","args":"--bundles dmg --target x86_64-apple-darwin","asset":"Splynt-Mac-Intel[ext]"}'
           case "$REQUESTED" in
             windows) include="$windows" ;;
             linux)   include="$linux" ;;
@@ -137,6 +139,7 @@ jobs:
           releaseName: ${{ github.ref_type == 'tag' && 'Splynt v__VERSION__' || '' }}
           releaseDraft: ${{ github.ref_type == 'tag' }}
           prerelease: false
+          releaseAssetNamePattern: ${{ matrix.asset }}
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: Splynt-[version]-[platform]-[arch]-[bundle]
           args: ${{ matrix.args }}

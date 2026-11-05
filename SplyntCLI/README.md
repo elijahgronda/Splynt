@@ -10,15 +10,21 @@ know in the [Discord](https://discord.gg/kkaZfRpsm).
 
 ## Install
 
-You need [Rust](https://rustup.rs). Then from this folder:
+On a Mac or Linux, paste this in:
 
 ```sh
-cargo install --path .
-splynt
+curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
 ```
 
-That puts `splynt` on your PATH, so after that you just type `splynt` from
-anywhere. Run the install again after pulling to update it.
+Then just type `splynt`. Run the same line again to update. On Windows, grab
+`splynt-windows-x64.zip` from the newest
+[Splynt CLI release](https://github.com/elijahgronda/Splynt/releases).
+
+If you'd rather build it yourself, you need [Rust](https://rustup.rs):
+
+```sh
+cargo install --git https://github.com/elijahgronda/Splynt splynt
+```
 
 The first launch asks for your server, username and password. Your password
 never gets saved. The config file (`~/.config/splynt/config.toml`) only

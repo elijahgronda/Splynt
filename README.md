@@ -14,9 +14,15 @@
 </p>
 
 <p align="center">
-  <a href="https://testflight.apple.com/join/UWvEDqQc"><strong>Join the iPhone beta</strong></a>
+  <a href="https://testflight.apple.com/join/UWvEDqQc"><strong>iPhone</strong></a>
   &nbsp;·&nbsp;
-  <a href="https://github.com/elijahgronda/Splynt/releases/latest"><strong>Download for Windows or Linux</strong></a>
+  <a href="https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Windows.exe"><strong>Windows</strong></a>
+  &nbsp;·&nbsp;
+  <a href="#install"><strong>Mac</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.AppImage"><strong>Linux</strong></a>
+  &nbsp;·&nbsp;
+  <a href="#install"><strong>Terminal</strong></a>
   &nbsp;·&nbsp;
   <a href="https://discord.gg/kkaZfRpsm"><strong>Discord</strong></a>
 </p>
@@ -24,40 +30,46 @@
 <p align="center">
   <img src="assets/screenshots/now-playing.jpg" alt="Now playing, with the lyrics card under the controls" width="200">
   <img src="assets/screenshots/lyrics.jpg" alt="Synced lyrics, full screen" width="200">
-  <img src="assets/screenshots/artist.jpg" alt="An artist page with popular songs and your play counts" width="200">
   <img src="assets/screenshots/album.jpg" alt="An album page with play counts and audio format on each track" width="200">
-</p>
-
-<p align="center">
-  <img src="assets/screenshots/liked-songs.jpg" alt="Liked Songs, with genre filters" width="200">
-  <img src="assets/screenshots/playlist.jpg" alt="A playlist" width="200">
   <img src="assets/screenshots/queue.jpg" alt="The queue, with mix, shuffle, repeat and a sleep timer" width="200">
-  <img src="assets/screenshots/equalizer.jpg" alt="The ten-band equalizer" width="200">
 </p>
 
 ---
 
-Splynt is a Navidrome client that has a very familiar UI. There are 3 builds
-right now: one for iPhone, one for desktop, and one that runs in a terminal.
+Splynt is a Navidrome client with a really familiar UI. It's on iPhone,
+desktop, and now the terminal too.
 
 I've been using it as my main player for a while now, so it's pretty polished.
-I put out updates pretty often though, so there are still a lot of things I'm
-ironing out. If you run into anything, let me know in the
+I put out updates pretty often though, so there are still things I'm ironing
+out. If you run into anything, let me know in the
 [Discord](https://discord.gg/kkaZfRpsm).
 
-## Get Splynt
+## Install
 
-| Device | How |
-| --- | --- |
-| iPhone | Beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc). An App Store release is planned! |
-| Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
-| Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
-| macOS | [Test builds](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml) or [build it from source](SplyntDesktop/README.md#building-on-a-mac) |
-| Terminal | [Build it with Rust](SplyntCLI/README.md#install), then just type `splynt` |
-| Apple TV and Apple Watch | in progress |
+**iPhone:** join the beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc).
+An App Store release is planned!
 
-The Windows installers aren't signed yet, so Windows might warn you the first time
-you open one. Hit **More info**, then **Run anyway**.
+**Windows:** download [Splynt-Windows.exe](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Windows.exe) and run it.
+It isn't signed yet, so Windows might warn you. Hit **More info**, then **Run anyway**.
+
+**Mac:** download [Apple Silicon](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Mac-Apple-Silicon.dmg) (M1 and
+newer) or [Intel](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Mac-Intel.dmg). It isn't signed yet either, so
+the first time you open it, go to System Settings, Privacy & Security, and hit
+**Open Anyway**.
+
+**Linux:** download the [AppImage](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.AppImage) or the
+[.deb](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.deb).
+
+**Terminal (Mac and Linux):** paste this in, then type `splynt`.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
+```
+
+Run it again any time to update. On Windows, grab `splynt-windows-x64.zip`
+from the newest [Splynt CLI release](https://github.com/elijahgronda/Splynt/releases).
+
+Apple TV and Apple Watch are in progress.
 
 ## Features
 
@@ -89,7 +101,7 @@ every track, and you can save your queue as a playlist.
 
 The iPhone app has the most stuff in it, and it's in beta on
 [TestFlight](https://testflight.apple.com/join/UWvEDqQc) right now. It has
-everything in the list above. Apple TV and Apple Watch are in progress.
+everything in the list above.
 
 ### Desktop
 
@@ -109,7 +121,8 @@ There's a terminal version too! It has a sidebar, cover art right in the
 terminal, search as you type, gapless and crossfade, the equalizer, a
 visualizer, downloads and Offline Mode, and the mouse works everywhere. It
 saves your queue to the server, so you can pick up on your phone where you
-left off. How to install it is in [SplyntCLI/README.md](SplyntCLI/README.md).
+left off. The one-liner is up in [Install](#install), and everything else is in
+[SplyntCLI/README.md](SplyntCLI/README.md).
 
 ## Bugs and feature requests
 
