@@ -76,6 +76,7 @@ every track, and you can save your queue as a playlist.
 | Windows | `.exe` or `.msi` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
 | Linux | `.AppImage` or `.deb` from the [latest release](https://github.com/elijahgronda/Splynt/releases/latest) |
 | macOS | [Test builds](https://github.com/elijahgronda/Splynt/actions/workflows/desktop-installers.yml) or [build it from source](SplyntDesktop/README.md#building-on-a-mac) |
+| Terminal | [Build it with Rust](SplyntCLI/README.md#install), then just type `splynt` |
 | Apple TV and Apple Watch | in progress |
 
 The Windows installers aren't signed yet, so Windows might warn you the first time
@@ -93,6 +94,14 @@ computers.
 It's made with Tauri 2, React and Rust. If you want to build it yourself, the
 steps are in [SplyntDesktop/README.md](SplyntDesktop/README.md).
 
+## Terminal
+
+There's a terminal version too! It has a sidebar, cover art right in the
+terminal, search as you type, gapless and crossfade, the equalizer, a
+visualizer, downloads and Offline Mode, and the mouse works everywhere. It
+saves your queue to the server, so you can pick up on your phone where you
+left off. How to install it is in [SplyntCLI/README.md](SplyntCLI/README.md).
+
 ## Bugs and feature requests
 
 Post them in the [Discord](https://discord.gg/kkaZfRpsm) forums! If it's a
@@ -100,6 +109,7 @@ bug, sending your log helps a ton:
 
 - **iPhone:** Settings, About, Export Debug Log
 - **Desktop:** Settings, Diagnostics, Show log
+- **Terminal:** run `splynt --log` to see where the log is
 
 ## Docs
 
@@ -112,7 +122,7 @@ bug, sending your log helps a ton:
 
 ## License
 
-The desktop app is [GPL-3.0 or later](LICENSE). Use it, change it, share it!
+The desktop app and the terminal app are [GPL-3.0 or later](LICENSE). Use it, change it, share it!
 If you share a modified version, it has to stay GPL with the source available.
 
 The iPhone, Apple TV and Apple Watch apps are separate and closed source, so

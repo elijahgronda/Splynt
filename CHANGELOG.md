@@ -4,6 +4,22 @@ Everything that's changed in each release, newest first. Desktop installers are
 on the [releases page](https://github.com/elijahgronda/Splynt/releases), and
 iPhone builds go out on [TestFlight](https://testflight.apple.com/join/UWvEDqQc).
 
+## Terminal
+
+### 0.1.0
+
+First version of Splynt in the terminal!!
+
+- Sidebar, cover art, a player bar and Now Playing, all in a terminal window.
+  The mouse works everywhere.
+- Search as you type, with your library first and recent searches.
+- Gapless, crossfade, the ten-band equalizer, ReplayGain and Autoplay.
+- A visualizer in the full screen player and the player bar.
+- Downloads, a cache that fills ahead of the queue, and Offline Mode.
+- A queue you can drag around, shuffle, clear and save as a playlist.
+- Your queue syncs with the server, so the iPhone app picks up where you left
+  off.
+
 ## Desktop
 
 ### 1.2.0, 2026-10-06
