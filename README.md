@@ -60,14 +60,18 @@ the first time you open it, go to System Settings, Privacy & Security, and hit
 **Linux:** download the [AppImage](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.AppImage) or the
 [.deb](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.deb).
 
-**Terminal (Mac and Linux):** paste this in, then type `splynt`.
+**Terminal:** paste one of these in, then type `splynt`. Run it again any
+time to update.
 
 ```sh
+# Mac and Linux
 curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
 ```
 
-Run it again any time to update. On Windows, grab `splynt-windows-x64.zip`
-from the newest [Splynt CLI release](https://github.com/elijahgronda/Splynt/releases).
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.ps1 | iex
+```
 
 Apple TV and Apple Watch are in progress.
 

@@ -87,6 +87,29 @@ jobs:
               ;;
           esac
 
+      - name: Try the install script on this build
+        if: runner.os != 'Windows'
+        working-directory: .
+        run: |
+          tarball=$(ls "$PWD"/SplyntCLI/splynt-*.tar.gz)
+          export SPLYNT_TARBALL="$tarball" SPLYNT_INSTALL_DIR="$RUNNER_TEMP/splynt-test"
+          sh install.sh
+          sh install.sh
+          "$SPLYNT_INSTALL_DIR/splynt" --help
+
+      - name: Try the Windows install script on this build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          $env:SPLYNT_ZIP = (Resolve-Path SplyntCLI/splynt-windows-x64.zip).Path
+          $env:SPLYNT_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'splynt-test'
+          # The same way the one-liner runs it, twice to cover an update.
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          & (Join-Path $env:SPLYNT_INSTALL_DIR 'splynt.exe') --help
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Keep the build
         uses: actions/upload-artifact@v4
         with:
@@ -119,7 +142,11 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
           \`\`\`
 
-          On Windows, unzip \`splynt-windows-x64.zip\` and run \`splynt.exe\`.
+          On Windows, paste this into PowerShell:
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.ps1 | iex
+          \`\`\`
 
           What's new is in the [changelog](https://github.com/elijahgronda/Splynt/blob/main/CHANGELOG.md#terminal).
           EOF

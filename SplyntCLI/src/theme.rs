@@ -82,6 +82,11 @@ pub fn bold() -> Style {
 /// reads `38;2;42;42;42` as four separate codes, where 42 means a green
 /// background. Terminals that do support it set `COLORTERM`.
 pub fn truecolor() -> bool {
+    // Every Windows console since Windows 10 does 24-bit color, and Windows
+    // Terminal doesn't set COLORTERM.
+    if cfg!(windows) {
+        return true;
+    }
     let ct = std::env::var("COLORTERM").unwrap_or_default();
     let term = std::env::var("TERM").unwrap_or_default();
     ct.contains("truecolor") || ct.contains("24bit") || term.contains("direct")

@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
 #
 # It puts the binary in ~/.local/bin. Set SPLYNT_INSTALL_DIR to use another
-# folder. Mac and Linux (x64) only; on Windows, grab the zip from the release.
+# folder. This one is for Mac and Linux. Windows has install.ps1.
 
 set -eu
 
@@ -31,22 +31,29 @@ if [ -z "$asset" ]; then
   exit 1
 fi
 
-# The newest CLI release. Desktop releases are tagged v*, the CLI cli-v*.
-tag=$(curl -fsSL "https://api.github.com/repos/$repo/releases?per_page=50" \
-  | grep -o '"tag_name": *"cli-v[^"]*"' \
-  | head -n 1 \
-  | sed 's/.*"\(cli-v[^"]*\)"/\1/')
-
-if [ -z "$tag" ]; then
-  echo "Couldn't find a Splynt CLI release on GitHub."
-  exit 1
-fi
-
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading splynt ${tag#cli-v}..."
-curl -fsSL "https://github.com/$repo/releases/download/$tag/$asset" -o "$tmp/$asset"
+if [ -n "${SPLYNT_TARBALL:-}" ]; then
+  # A local build, for testing the script.
+  tag="cli-vlocal"
+  cp "$SPLYNT_TARBALL" "$tmp/$asset"
+else
+  # The newest CLI release. Desktop releases are tagged v*, the CLI cli-v*.
+  tag=$(curl -fsSL "https://api.github.com/repos/$repo/releases?per_page=50" \
+    | grep -o '"tag_name": *"cli-v[^"]*"' \
+    | head -n 1 \
+    | sed 's/.*"\(cli-v[^"]*\)"/\1/')
+
+  if [ -z "$tag" ]; then
+    echo "Couldn't find a Splynt CLI release on GitHub."
+    exit 1
+  fi
+
+  echo "Downloading splynt ${tag#cli-v}..."
+  curl -fsSL "https://github.com/$repo/releases/download/$tag/$asset" -o "$tmp/$asset"
+fi
+
 tar -xzf "$tmp/$asset" -C "$tmp"
 
 mkdir -p "$dir"

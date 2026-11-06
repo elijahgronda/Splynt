@@ -16,8 +16,14 @@ On a Mac or Linux, paste this in:
 curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
 ```
 
-Then just type `splynt`. Run the same line again to update. On Windows, grab
-`splynt-windows-x64.zip` from the newest
+On Windows, paste this into PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.ps1 | iex
+```
+
+Then just type `splynt`. Run the same line again to update. If you'd rather
+grab the files yourself, they're in the newest
 [Splynt CLI release](https://github.com/elijahgronda/Splynt/releases).
 
 If you'd rather build it yourself, you need [Rust](https://rustup.rs):
@@ -95,7 +101,8 @@ press `i` anywhere.
 
 Terminal.app doesn't do full color, so Splynt drops to the closest 256
 colors there. It works, it just looks grainier. Ghostty or iTerm2 look way
-better.
+better. On Windows, use Windows Terminal. It does full color, and newer versions
+support Sixel, so they should show real cover art.
 
 ## Formats
 
@@ -105,8 +112,9 @@ Settings, Audio quality can cap streaming at 128, 256 or 320 kbps.
 
 ## If something goes wrong
 
-There's a log at `~/Library/Logs/splynt/splynt.log` on a Mac
-(`splynt --log` prints where it is). It has failed requests, dropped
+There's a log at `~/Library/Logs/splynt/splynt.log` on a Mac and
+`%LOCALAPPDATA%\splynt\splynt.log` on Windows (`splynt --log` prints where
+it is). It has failed requests, dropped
 streams, songs that wouldn't play and crashes. It never has your token in
 it. Settings, About shows the last few lines too.
 

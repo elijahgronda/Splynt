@@ -340,6 +340,8 @@ impl App {
                 r.push(SRow::Info("Log file", crate::log::path().display().to_string()));
                 #[cfg(target_os = "macos")]
                 r.push(SRow::Action(SKey::ShowLog, "Show the log in Finder".into(), false, None));
+                #[cfg(windows)]
+                r.push(SRow::Action(SKey::ShowLog, "Show the log in File Explorer".into(), false, None));
                 r.push(SRow::Header("Recent log lines".into()));
                 for l in crate::log::tail(8) {
                     r.push(SRow::Note(l));
@@ -427,6 +429,11 @@ impl App {
             }
             SKey::SignOut => self.run(super::Action::SignOut),
             SKey::ShowLog => {
+                #[cfg(windows)]
+                let _ = std::process::Command::new("explorer")
+                    .arg(format!("/select,{}", crate::log::path().display()))
+                    .spawn();
+                #[cfg(not(windows))]
                 let _ = std::process::Command::new("open").arg("-R").arg(crate::log::path()).spawn();
             }
             SKey::ResetAll => {
