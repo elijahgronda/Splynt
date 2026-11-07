@@ -1,0 +1,157 @@
+name: CLI release
+
+# Pushing a cli-v* tag builds splynt for Mac (one universal binary), Linux and
+# Windows and publishes them as "Splynt CLI <version>". It's never marked
+# Latest, so the desktop release stays what releases/latest points to.
+# install.sh finds the newest cli-v* release on its own.
+#
+# A manual run or a pull request only builds, with the files under the run's
+# Artifacts.
+
+on:
+  workflow_dispatch:
+  # Pull requests that touch the CLI build it on every platform, without
+  # publishing anything.
+  pull_request:
+    paths:
+      - "SplyntCLI/**"
+      - ".github/workflows/cli-release.yml"
+  push:
+    tags:
+      - "cli-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mac
+            os: macos-15
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - name: linux-x64
+            os: ubuntu-22.04
+            targets: ""
+          - name: windows-x64
+            os: windows-latest
+            targets: ""
+    defaults:
+      run:
+        shell: bash
+        working-directory: SplyntCLI
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Linux audio headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: SplyntCLI -> target
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          case "${{ matrix.name }}" in
+            mac)
+              cargo build --release --locked --target aarch64-apple-darwin
+              cargo build --release --locked --target x86_64-apple-darwin
+              lipo -create -output dist/splynt \
+                target/aarch64-apple-darwin/release/splynt \
+                target/x86_64-apple-darwin/release/splynt
+              tar -czf splynt-mac.tar.gz -C dist splynt
+              ;;
+            linux-x64)
+              cargo build --release --locked
+              tar -czf splynt-linux-x64.tar.gz -C target/release splynt
+              ;;
+            windows-x64)
+              cargo build --release --locked
+              7z a splynt-windows-x64.zip ./target/release/splynt.exe
+              ;;
+          esac
+
+      - name: Try the install script on this build
+        if: runner.os != 'Windows'
+        working-directory: .
+        run: |
+          tarball=$(ls "$PWD"/SplyntCLI/splynt-*.tar.gz)
+          export SPLYNT_TARBALL="$tarball" SPLYNT_INSTALL_DIR="$RUNNER_TEMP/splynt-test"
+          sh install.sh
+          sh install.sh
+          "$SPLYNT_INSTALL_DIR/splynt" --help
+
+      - name: Try the Windows install script on this build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          $env:SPLYNT_ZIP = (Resolve-Path SplyntCLI/splynt-windows-x64.zip).Path
+          $env:SPLYNT_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'splynt-test'
+          # The same way the one-liner runs it, twice to cover an update.
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          & (Join-Path $env:SPLYNT_INSTALL_DIR 'splynt.exe') --help
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: splynt-${{ matrix.name }}
+          path: SplyntCLI/splynt-*.*
+
+  publish:
+    name: Publish the release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect the builds
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#cli-v}"
+          cat > notes.md <<EOF
+          Splynt in the terminal, version ${version}.
+
+          On a Mac or Linux, install or update it with:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
+          \`\`\`
+
+          On Windows, paste this into PowerShell:
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.ps1 | iex
+          \`\`\`
+
+          What's new is in the [changelog](https://github.com/elijahgronda/Splynt/blob/main/CHANGELOG.md#terminal).
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Splynt CLI ${version}" \
+            --notes-file notes.md \
+            --latest=false
