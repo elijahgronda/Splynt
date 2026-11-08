@@ -16,28 +16,28 @@
 <p align="center">
   <a href="https://testflight.apple.com/join/UWvEDqQc"><strong>iPhone</strong></a>
   &nbsp;·&nbsp;
+  <a href="#install"><strong>Terminal</strong></a>
+  &nbsp;·&nbsp;
   <a href="https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Windows.exe"><strong>Windows</strong></a>
   &nbsp;·&nbsp;
-  <a href="#install"><strong>Mac</strong></a>
+  <a href="#desktop-downloads"><strong>Mac</strong></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.AppImage"><strong>Linux</strong></a>
-  &nbsp;·&nbsp;
-  <a href="#install"><strong>Terminal</strong></a>
   &nbsp;·&nbsp;
   <a href="https://discord.gg/kkaZfRpsm"><strong>Discord</strong></a>
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/now-playing.jpg" alt="Now playing, with the lyrics card under the controls" width="200">
-  <img src="assets/screenshots/lyrics.jpg" alt="Synced lyrics, full screen" width="200">
-  <img src="assets/screenshots/album.jpg" alt="An album page with play counts and audio format on each track" width="200">
-  <img src="assets/screenshots/queue.jpg" alt="The queue, with mix, shuffle, repeat and a sleep timer" width="200">
+  <img src="assets/screenshots/iphone/home.jpg" alt="Home, with your pinned playlists, On repeat and Jump back in" width="24%">
+  <img src="assets/screenshots/iphone/now-playing.jpg" alt="Now playing, with the audio format and a lyrics preview" width="24%">
+  <img src="assets/screenshots/iphone/lyrics.jpg" alt="Synced lyrics, full screen" width="24%">
+  <img src="assets/screenshots/iphone/artist.jpg" alt="An artist page with your liked songs and their popular songs" width="24%">
 </p>
 
 ---
 
 Splynt is a Navidrome client with a really familiar UI. It's on iPhone,
-desktop, and now the terminal too.
+the terminal and desktop.
 
 I've been using it as my main player for a while now, so it's pretty polished.
 I put out updates pretty often though, so there are still things I'm ironing
@@ -49,29 +49,38 @@ out. If you run into anything, let me know in the
 **iPhone:** join the beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc).
 An App Store release is planned!
 
-**Windows:** download [Splynt-Windows.exe](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Windows.exe) and run it.
-It isn't signed yet, so Windows might warn you. Hit **More info**, then **Run anyway**.
-
-**Mac:** download [Apple Silicon](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Mac-Apple-Silicon.dmg) (M1 and
-newer) or [Intel](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Mac-Intel.dmg). It isn't signed yet either, so
-the first time you open it, go to System Settings, Privacy & Security, and hit
-**Open Anyway**.
-
-**Linux:** download the [AppImage](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.AppImage) or the
-[.deb](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.deb).
-
-**Terminal:** paste one of these in, then type `splynt`. Run it again any
-time to update.
+**Terminal:** paste this in, then type `splynt`.
 
 ```sh
-# Mac and Linux
 curl -fsSL https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.sh | sh
 ```
 
+On Windows, paste this into PowerShell instead:
+
 ```powershell
-# Windows (PowerShell)
 irm https://raw.githubusercontent.com/elijahgronda/Splynt/main/install.ps1 | iex
 ```
+
+Run it again any time to update.
+
+### Desktop downloads
+
+| System | Download |
+| --- | --- |
+| **Windows** | [Splynt-Windows.exe](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Windows.exe) |
+| **Mac** | [Apple Silicon](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Mac-Apple-Silicon.dmg) (M1 and newer) · [Intel](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Mac-Intel.dmg) |
+| **Linux** | [AppImage](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.AppImage) · [.deb](https://github.com/elijahgronda/Splynt/releases/latest/download/Splynt-Linux.deb) |
+
+<details>
+<summary>Windows or Mac won't open it?</summary>
+<br>
+
+The desktop app isn't signed yet, so both warn you the first time.
+
+- **Windows:** hit **More info**, then **Run anyway**.
+- **Mac:** open it once, then go to System Settings, Privacy & Security, and hit **Open Anyway**.
+
+</details>
 
 Apple TV and Apple Watch are in progress.
 
@@ -103,9 +112,32 @@ every track, and you can save your queue as a playlist.
 
 ### iPhone
 
-The iPhone app has the most stuff in it, and it's in beta on
-[TestFlight](https://testflight.apple.com/join/UWvEDqQc) right now. It has
-everything in the list above.
+The iPhone app has the most stuff in it, and it's what I work on the most.
+It's in beta on [TestFlight](https://testflight.apple.com/join/UWvEDqQc) right
+now, and it has everything in the list above.
+
+<p align="center">
+  <img src="assets/screenshots/iphone/search.jpg" alt="Search, with your genres and artists in rotation" width="24%">
+  <img src="assets/screenshots/iphone/library.jpg" alt="Your Library, filtered to playlists" width="24%">
+  <img src="assets/screenshots/iphone/lyrics-card.jpg" alt="The lyrics card under the player controls" width="24%">
+  <img src="assets/screenshots/iphone/lyrics-share.jpg" alt="Synced lyrics with Share lyrics" width="24%">
+</p>
+
+### Terminal
+
+There's a terminal version too! It has a sidebar, cover art right in the
+terminal, search as you type, gapless and crossfade, the equalizer, a
+visualizer, downloads and Offline Mode, and the mouse works everywhere. It
+saves your queue to the server, so you can pick up on your phone where you
+left off.
+
+<p align="center">
+  <img src="assets/screenshots/terminal/home.webp" alt="The terminal app's Home page, with pixel cover art and the player along the bottom" width="49%">
+  <img src="assets/screenshots/terminal/search.webp" alt="Searching in the terminal app, with the top result, songs, artists and albums together" width="49%">
+</p>
+
+The one-liner is up in [Install](#install), and everything else is in
+[SplyntCLI/README.md](SplyntCLI/README.md).
 
 ### Desktop
 
@@ -116,17 +148,14 @@ crossfade, equalizer, synced lyrics and discography pages as the iPhone app,
 plus listening stats and Splynt Connect so you can pass playback between your
 computers.
 
+<p align="center">
+  <img src="assets/screenshots/desktop/home.webp" alt="Home on desktop, with recently played albums and the player along the bottom" width="98%">
+  <img src="assets/screenshots/desktop/artist.webp" alt="An artist page on desktop" width="49%">
+  <img src="assets/screenshots/desktop/lyrics.webp" alt="Synced lyrics next to the album art on desktop" width="49%">
+</p>
+
 It's made with Tauri 2, React and Rust. If you want to build it yourself, the
 steps are in [SplyntDesktop/README.md](SplyntDesktop/README.md).
-
-### Terminal
-
-There's a terminal version too! It has a sidebar, cover art right in the
-terminal, search as you type, gapless and crossfade, the equalizer, a
-visualizer, downloads and Offline Mode, and the mouse works everywhere. It
-saves your queue to the server, so you can pick up on your phone where you
-left off. The one-liner is up in [Install](#install), and everything else is in
-[SplyntCLI/README.md](SplyntCLI/README.md).
 
 ## Bugs and feature requests
 
